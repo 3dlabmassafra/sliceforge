@@ -373,7 +373,7 @@ export function App() {
   }, [s.pieces])
 
   useEffect(() => {
-    viewerRef.current?.setSelectedPiece(selectedId)
+    viewerRef.current?.setSelected(selectedId)
   }, [selectedId])
 
   useEffect(() => {
