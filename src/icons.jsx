@@ -1,3 +1,5 @@
+import React from 'react'
+
 // Inline SVG icons — stroke-based, inherit the button's text color.
 const base = {
   width: 15,
@@ -83,5 +85,51 @@ export const IconLogo = () => (
   <svg {...base} width={18} height={18}>
     <path d="M12 2.5 21 7v10l-9 4.5L3 17V7l9-4.5Z" />
     <line x1="3.5" y1="16.5" x2="20.5" y2="7.5" />
+  </svg>
+)
+
+export const IconPlane = () => (
+  <svg {...base}>
+    <polygon points="3,6 21,3 18,18 3,21" />
+    <line x1="3" y1="6" x2="18" y2="18" />
+  </svg>
+)
+
+export const IconPlate = () => (
+  <svg {...base}>
+    <rect x="3" y="5" width="18" height="14" rx="2" />
+    <line x1="3" y1="12" x2="21" y2="12" />
+    <line x1="12" y1="5" x2="12" y2="19" />
+  </svg>
+)
+
+export const IconFlip = () => (
+  <svg {...base}>
+    <path d="m3 7 4-4 4 4" />
+    <path d="M7 3v10a4 4 0 0 0 4 4h10" />
+    <path d="m21 17-4 4-4-4" />
+  </svg>
+)
+
+export const IconGrip = () => (
+  <svg {...base} width={12} height={12}>
+    <circle cx="8" cy="5" r="1.5" fill="currentColor" stroke="none" />
+    <circle cx="16" cy="5" r="1.5" fill="currentColor" stroke="none" />
+    <circle cx="8" cy="12" r="1.5" fill="currentColor" stroke="none" />
+    <circle cx="16" cy="12" r="1.5" fill="currentColor" stroke="none" />
+    <circle cx="8" cy="19" r="1.5" fill="currentColor" stroke="none" />
+    <circle cx="16" cy="19" r="1.5" fill="currentColor" stroke="none" />
+  </svg>
+)
+
+export const IconMinimize = () => (
+  <svg {...base} width={12} height={12}>
+    <line x1="4" y1="12" x2="20" y2="12" />
+  </svg>
+)
+
+export const IconMaximize = () => (
+  <svg {...base} width={12} height={12}>
+    <rect x="4" y="4" width="16" height="16" rx="2" />
   </svg>
 )

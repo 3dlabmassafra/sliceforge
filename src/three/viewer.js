@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
 import { AXIS_QUATS } from '../geometry/plane.js'
+import { computeSectionSegments } from '../geometry/sectionContour.js'
 import { coplanarRegion, growRegion, regionPositions } from '../geometry/shapeSelect.js'
 
 export const PIECE_COLORS = [0x5b8dee, 0xee8a5b, 0x62c48a, 0xd46bc8, 0xe0c34f, 0x6bd4cf, 0x9a7be4]
@@ -282,6 +283,19 @@ export class Viewer {
         return
       }
       if (this.planeMode && this.planeGizmo?.dragging) return
+      if (this.plateMode && this.plateGizmo?.dragging) return
+
+      if (this.plateMode && this.plateMoveMode) {
+        const hits = this._raycaster.intersectObjects(
+          this.piecesGroup.children.filter((m) => m.visible),
+          false
+        )
+        const hit = hits[0]
+        if (hit?.face) {
+          this.onPlatePick?.(hit.point.clone(), hit.face.normal.clone())
+          return
+        }
+      }
       // Connector placement: clicks land on the plane quad, in plane-local mm.
       if (this.pinMode && this.planeObj?.visible) {
         const hit = this._raycaster.intersectObject(this.planeObj, false)[0]

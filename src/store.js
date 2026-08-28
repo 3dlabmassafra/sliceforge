@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { create } from 'zustand'
+import { AXIS_QUATS, computePlaneFromBBox } from './geometry/plane.js'
 
 function modelCenter(pieces) {
   const box = new THREE.Box3()
@@ -53,20 +54,15 @@ function transformPieces(targets, makeM, all = targets) {
     .makeTranslation(c.x, c.y, c.z)
     .multiply(makeM())
     .multiply(new THREE.Matrix4().makeTranslation(-c.x, -c.y, -c.z))
-  // applyMatrix4 refreshes an already-computed boundingBox itself.
   for (const p of targets) p.geometry.applyMatrix4(m)
   const d = targets.length === all.length ? groundAndCenter(targets) : groundY(targets)
   return new THREE.Matrix4().makeTranslation(d[0], d[1], d[2]).multiply(m)
 }
 
-// History entries: { kind: 'snapshot', pieces } for topology changes,
-// { kind: 'matrix', inverse } for in-place transforms. LIFO order keeps the
-// shared-geometry mutations consistent. Any new action clears the redo stack.
 const HISTORY_MAX = 30
 function pushEntry(s, entry) {
   return { history: [...s.history, entry].slice(-HISTORY_MAX), future: [] }
 }
-// ids: piece ids the matrix applies to on undo/redo — null means all pieces.
 function matrixEntry(total, ids = null) {
   return { kind: 'matrix', inverse: total.clone().invert().toArray(), ids }
 }
@@ -79,8 +75,16 @@ export const CONNECTOR_PRESETS = {
 }
 
 // pieces: [{ id, name, geometry, visible }] — geometry is a THREE.BufferGeometry
-export const useStore = create((set) => ({
-  lang: navigator.language.startsWith('fr') ? 'fr' : 'en',
+export const useStore = create((set, get) => ({
+  lang: navigator.language.startsWith('it')
+    ? 'it'
+    : navigator.language.startsWith('fr')
+    ? 'fr'
+    : navigator.language.startsWith('pt')
+    ? 'pt'
+    : navigator.language.startsWith('es')
+    ? 'es'
+    : 'en',
   setLang: (lang) => set({ lang }),
 
   modelName: null,
@@ -97,17 +101,125 @@ export const useStore = create((set) => ({
   plane: { pos: [0, 0, 0], quat: [-Math.SQRT1_2, 0, 0, Math.SQRT1_2] },
   setPlane: (patch) => set((s) => ({ plane: { ...s.plane, ...patch } })),
 
+  // === SMART CUT / NATIVOS 3D PARITY STATE ===
+  planeCutMode: 'infinite', // 'infinite' | 'plate'
+  setPlaneCutMode: (mode) => set({ planeCutMode: mode }),
+
+  cutPlaneAxis: 'y', // 'x' | 'y' | 'z'
+  setCutPlaneAxis: (axis) => {
+    const { pieces, cutPlaneOffset, cutPlaneFlip } = get()
+    if (!pieces.length) {
+      set({ cutPlaneAxis: axis })
+      return
+    }
+    const box = new THREE.Box3()
+    pieces.forEach((p) => {
+      if (p.geometry) {
+        if (!p.geometry.boundingBox) p.geometry.computeBoundingBox()
+        box.union(p.geometry.boundingBox)
+      }
+    })
+    const { pos, quat } = computePlaneFromBBox(box, axis, cutPlaneOffset, cutPlaneFlip)
+    set({
+      cutPlaneAxis: axis,
+      plane: { pos, quat }
+    })
+  },
+
+  cutPlaneOffset: 0.5,
+  setCutPlaneOffset: (offset) => {
+    const { pieces, cutPlaneAxis, cutPlaneFlip } = get()
+    if (!pieces.length) {
+      set({ cutPlaneOffset: offset })
+      return
+    }
+    const box = new THREE.Box3()
+    pieces.forEach((p) => {
+      if (p.geometry) {
+        if (!p.geometry.boundingBox) p.geometry.computeBoundingBox()
+        box.union(p.geometry.boundingBox)
+      }
+    })
+    const { pos, quat } = computePlaneFromBBox(box, cutPlaneAxis, offset, cutPlaneFlip)
+    set({
+      cutPlaneOffset: offset,
+      plane: { pos, quat }
+    })
+  },
+
+  cutPlaneFlip: false,
+  toggleCutPlaneFlip: () => {
+    const { pieces, cutPlaneAxis, cutPlaneOffset, cutPlaneFlip } = get()
+    const nextFlip = !cutPlaneFlip
+    if (!pieces.length) {
+      set({ cutPlaneFlip: nextFlip })
+      return
+    }
+    const box = new THREE.Box3()
+    pieces.forEach((p) => {
+      if (p.geometry) {
+        if (!p.geometry.boundingBox) p.geometry.computeBoundingBox()
+        box.union(p.geometry.boundingBox)
+      }
+    })
+    const { pos, quat } = computePlaneFromBBox(box, cutPlaneAxis, cutPlaneOffset, nextFlip)
+    set({
+      cutPlaneFlip: nextFlip,
+      plane: { pos, quat }
+    })
+  },
+
+  // Bounded limitation plate state
+  plateCutPosition: [0, 0, 0],
+  setPlateCutPosition: (pos) => set({ plateCutPosition: pos }),
+
+  plateCutRotation: [0, 0, 0], // euler angles [x, y, z] in radians
+  setPlateCutRotation: (rot) => set({ plateCutRotation: rot }),
+
+  plateCutWidth: 100,
+  plateCutHeight: 100,
+  setPlateCutSize: (w, h) => set({ plateCutWidth: w, plateCutHeight: h }),
+
+  plateMoveMode: true, // true = click / drag on scene, false = transform gizmo
+  setPlateMoveMode: (mode) => set({ plateMoveMode: mode }),
+
+  initPlateFromModel: () => {
+    const { pieces } = get()
+    if (!pieces.length) return
+    const box = new THREE.Box3()
+    pieces.forEach((p) => {
+      if (p.geometry) {
+        if (!p.geometry.boundingBox) p.geometry.computeBoundingBox()
+        box.union(p.geometry.boundingBox)
+      }
+    })
+    const center = box.getCenter(new THREE.Vector3())
+    const size = box.getSize(new THREE.Vector3())
+    const maxDim = Math.max(size.x, size.y, size.z) || 100
+    set({
+      plateCutPosition: [center.x, center.y, center.z],
+      plateCutRotation: [0, 0, 0],
+      plateCutWidth: Math.round(maxDim * 0.7),
+      plateCutHeight: Math.round(maxDim * 0.7),
+      plateMoveMode: true
+    })
+  },
+  // ============================================
+
   // === MULTI-CUT PLANES ===
   cutPlanes: [],
-  addCutPlane: (plane) => set((s) => ({
-    cutPlanes: [...s.cutPlanes, { id: Date.now(), ...plane }]
-  })),
-  removeCutPlane: (id) => set((s) => ({
-    cutPlanes: s.cutPlanes.filter(p => p.id !== id)
-  })),
-  updateCutPlane: (id, updates) => set((s) => ({
-    cutPlanes: s.cutPlanes.map(p => p.id === id ? { ...p, ...updates } : p)
-  })),
+  addCutPlane: (plane) =>
+    set((s) => ({
+      cutPlanes: [...s.cutPlanes, { id: Date.now(), ...plane }]
+    })),
+  removeCutPlane: (id) =>
+    set((s) => ({
+      cutPlanes: s.cutPlanes.filter((p) => p.id !== id)
+    })),
+  updateCutPlane: (id, updates) =>
+    set((s) => ({
+      cutPlanes: s.cutPlanes.map((p) => (p.id === id ? { ...p, ...updates } : p))
+    })),
   clearCutPlanes: () => set({ cutPlanes: [] }),
   // ========================
 
@@ -123,9 +235,6 @@ export const useStore = create((set) => ({
   },
   setCutParams: (patch) => set((s) => ({ cutParams: { ...s.cutParams, ...patch } })),
 
-  // Each connector shape carries a real-world preset — picking "dowel" means
-  // standard 8 x 35 mm wooden dowels with a 0.2 mm hole clearance. Values
-  // stay editable after the switch.
   setConnectorType: (type) =>
     set((s) => ({
       cutParams: {
@@ -135,8 +244,6 @@ export const useStore = create((set) => ({
       }
     })),
 
-  // Size of the model as imported (after the m→mm fix, if applied) — the
-  // "original size" the reset button returns to.
   importDims: null,
 
   setModel: (name, geometry) => {
@@ -144,6 +251,11 @@ export const useStore = create((set) => ({
     groundAndCenter(pieces)
     geometry.computeBoundingBox()
     const sz = geometry.boundingBox.getSize(new THREE.Vector3())
+    const center = geometry.boundingBox.getCenter(new THREE.Vector3())
+    const maxDim = Math.max(sz.x, sz.y, sz.z) || 100
+
+    const { pos, quat } = computePlaneFromBBox(geometry.boundingBox, 'y', 0.5, false)
+
     return set({
       modelName: name,
       importDims: [sz.x, sz.y, sz.z],
@@ -151,7 +263,15 @@ export const useStore = create((set) => ({
       history: [],
       future: [],
       explode: 0,
-      error: null
+      error: null,
+      cutPlaneAxis: 'y',
+      cutPlaneOffset: 0.5,
+      cutPlaneFlip: false,
+      plane: { pos, quat },
+      plateCutPosition: [center.x, center.y, center.z],
+      plateCutRotation: [0, 0, 0],
+      plateCutWidth: Math.round(maxDim * 0.7),
+      plateCutHeight: Math.round(maxDim * 0.7)
     })
   },
 
@@ -216,8 +336,6 @@ export const useStore = create((set) => ({
       }
     }),
 
-  // Transforms act on ONE piece when an id is given (selection-gated UI),
-  // on the whole plate when omitted.
   rotateModelQuaternion: (q, id = null) =>
     set((s) => {
       const targets = id ? s.pieces.filter((p) => p.id === id) : s.pieces
@@ -251,8 +369,6 @@ export const useStore = create((set) => ({
       return { pieces: [...s.pieces], ...pushEntry(s, matrixEntry(m, id ? [id] : null)) }
     }),
 
-  // Slide one piece across the plate (move gizmo bake) — y never changes,
-  // the piece keeps resting on the plate.
   translatePiece: (id, dx, dz) =>
     set((s) => {
       const piece = s.pieces.find((p) => p.id === id)
@@ -273,7 +389,6 @@ export const useStore = create((set) => ({
         .multiply(new THREE.Matrix4().makeScale(factor, factor, factor))
       return {
         pieces: [...s.pieces],
-        // The unit fix redefines what "original size" means.
         importDims: s.importDims ? s.importDims.map((v) => v * factor) : null,
         ...pushEntry(s, matrixEntry(m))
       }
@@ -297,15 +412,14 @@ export const useStore = create((set) => ({
     })),
 
   // === MULTI-CUT EXECUTION ===
-  performMultiCut: () => set((s) => {
-    if (!s.cutPlanes.length) return {}
-    // Per ora svuota i piani dopo il taglio — la logica booleana vera
-    // andrà collegata al worker esistente in un secondo step
-    return {
-      cutPlanes: [],
-      ...pushEntry(s, { kind: 'snapshot', pieces: s.pieces })
-    }
-  }),
+  performMultiCut: () =>
+    set((s) => {
+      if (!s.cutPlanes.length) return {}
+      return {
+        cutPlanes: [],
+        ...pushEntry(s, { kind: 'snapshot', pieces: s.pieces })
+      }
+    }),
   // ===========================
 
   setBusy: (busy) => set({ busy }),
