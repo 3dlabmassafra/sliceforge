@@ -97,6 +97,20 @@ export const useStore = create((set) => ({
   plane: { pos: [0, 0, 0], quat: [-Math.SQRT1_2, 0, 0, Math.SQRT1_2] },
   setPlane: (patch) => set((s) => ({ plane: { ...s.plane, ...patch } })),
 
+  // === MULTI-CUT PLANES ===
+  cutPlanes: [],
+  addCutPlane: (plane) => set((s) => ({
+    cutPlanes: [...s.cutPlanes, { id: Date.now(), ...plane }]
+  })),
+  removeCutPlane: (id) => set((s) => ({
+    cutPlanes: s.cutPlanes.filter(p => p.id !== id)
+  })),
+  updateCutPlane: (id, updates) => set((s) => ({
+    cutPlanes: s.cutPlanes.map(p => p.id === id ? { ...p, ...updates } : p)
+  })),
+  clearCutPlanes: () => set({ cutPlanes: [] }),
+  // ========================
+
   cutParams: {
     kerf: 0.15,
     pins: true,
@@ -281,6 +295,18 @@ export const useStore = create((set) => ({
     set((s) => ({
       pieces: s.pieces.map((p) => (p.id === id ? { ...p, visible: !p.visible } : p))
     })),
+
+  // === MULTI-CUT EXECUTION ===
+  performMultiCut: () => set((s) => {
+    if (!s.cutPlanes.length) return {}
+    // Per ora svuota i piani dopo il taglio — la logica booleana vera
+    // andrà collegata al worker esistente in un secondo step
+    return {
+      cutPlanes: [],
+      ...pushEntry(s, { kind: 'snapshot', pieces: s.pieces })
+    }
+  }),
+  // ===========================
 
   setBusy: (busy) => set({ busy }),
   setError: (error) => set({ error })
