@@ -127,6 +127,7 @@ export class Viewer {
     this.selectedPieceId = null
     this._raycaster = new THREE.Raycaster()
     this._downPos = null
+    this._isBrushing = false
     canvas.addEventListener('pointerdown', (e) => {
       if (e.button === 2) {
         this._rDownPos = [e.clientX, e.clientY]
@@ -162,7 +163,13 @@ export class Viewer {
           ),
           this.camera
         )
-      if (this._dragPin) {
+      if (this._isBrushing) {
+          setRay()
+          const hit = this._raycaster.intersectObjects(this.piecesGroup.children.filter((m) => m.visible), false)[0]
+          if (hit?.face) this.onShapePick?.(hit.faceIndex, hit.object.userData.pieceId, true)
+          return
+        }
+        if (this._dragPin) {
         setRay()
         const { pos, quat } = this._dragPin.userData.plane
         const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(new THREE.Quaternion(...quat))
@@ -315,7 +322,11 @@ export class Viewer {
         )
         const hit = hits[0]
         if (!hit?.face) return
-        if (this.shapeMode) this.onShapePick?.(hit.faceIndex, hit.object.userData.pieceId)
+        if (this.shapeMode) {
+            this._isBrushing = true
+            this.controls.enabled = false
+            this.onShapePick?.(hit.faceIndex, hit.object.userData.pieceId, false)
+          }
         else if (this.planeMode)
           this.onPlanePick?.(hit.point.clone(), hit.face.normal.clone())
         else this.onFacePick?.(hit.face.normal.clone(), hit.object.userData.pieceId)

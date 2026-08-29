@@ -172,6 +172,48 @@ export function App() {
   const [shapeRadius, setShapeRadius] = useState(25)
   const [shapeSeed, setShapeSeed] = useState(null)
   const [shapeMeta, setShapeMeta] = useState(null)
+  const shapeSelRef = useRef(null)
+
+  function clearShapeSel() {
+    shapeSelRef.current = null
+    setShapeMeta(null)
+    viewerRef.current?.setShapeHighlight(null)
+  }
+
+  function runShapeSelection(pieceId, faceIndex, sens, radius, isBrushing) {
+    const piece = useStore.getState().pieces.find((p) => p.id === pieceId)
+    if (!piece) return
+    const res = growRegion(piece.geometry, faceIndex, sens, radius)
+    
+    if (!isBrushing) {
+      if (res.count >= res.triCount * 0.95) {
+        shapeSelRef.current = { pieceId, sel: null }
+        setShapeMeta(null)
+        viewerRef.current?.setShapeHighlight(null)
+        useStore.getState().setError(makeT(useStore.getState().lang)('shapeWhole'))
+        return
+      }
+      shapeSelRef.current = { pieceId, sel: res.sel, count: res.count }
+    } else {
+      // Brushing mode: accumulate selection!
+      if (!shapeSelRef.current || shapeSelRef.current.pieceId !== pieceId || !shapeSelRef.current.sel) {
+        shapeSelRef.current = { pieceId, sel: res.sel, count: res.count }
+      } else {
+        const curSel = shapeSelRef.current.sel;
+        let newCount = shapeSelRef.current.count;
+        for (let i = 0; i < res.sel.length; i++) {
+          if (res.sel[i] && !curSel[i]) {
+            curSel[i] = 1;
+            newCount++;
+          }
+        }
+        shapeSelRef.current.count = newCount;
+      }
+    }
+    useStore.getState().setError(null)
+    setShapeMeta({ pieceId, count: shapeSelRef.current.count })
+    viewerRef.current?.setShapeHighlight(regionPositions(piece.geometry, shapeSelRef.current.sel, shapeSelRef.current.count))
+  }
 
   const isDowelPiece = (p) => p.name.startsWith('dowel_') || p.name.startsWith('cavilha_') || p.name.startsWith('spinotto_')
   const addDowelPiece = (count) => {
@@ -565,6 +607,12 @@ export function App() {
     }
   }, [activeTool, selectedId])
 
+  
+  useEffect(() => {
+    if (!shapeSeed) return
+    runShapeSelection(shapeSeed.pieceId, shapeSeed.faceIdx, shapeSens, effRadius, shapeSeed.isBrushing)
+  }, [shapeSeed, shapeSens, effRadius])
+
   const revealCut = () => {
     if (!s.pieces.length) return
     const box = new THREE.Box3()
@@ -689,7 +737,7 @@ export function App() {
     if (!shapeMeta || !shapeSeed) return
     const piece = s.pieces.find((p) => p.id === shapeSeed.pieceId)
     if (!piece) return
-    const selPos = regionPositions(piece.geometry, shapeMeta.sel)
+    const selPos = regionPositions(piece.geometry, shapeSelRef.current.sel)
     const { matrix } = regionOrientedBox(selPos)
     s.setBusy(true)
     s.setError(null)
