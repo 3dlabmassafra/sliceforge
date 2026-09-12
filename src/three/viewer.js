@@ -109,10 +109,12 @@ export class Viewer {
     // gizmo grab) raycasts the pieces' bounding boxes — O(pieces), instant
     // even on multi-million-triangle meshes.
     this.onPieceClick = null
+    this.onSelect = null // same payload as onPieceClick (App-facing alias)
     this.onFacePick = null
     this.onShapePick = null
     this.onPlanePick = null
     this.onPlaneChange = null
+    this.onPlateChange = null
     this.onPinPick = null
     this.onPuzzlePinAdd = null
     this.onPuzzlePinRemove = null
@@ -291,7 +293,6 @@ export class Viewer {
       }
       if (this.planeMode && this.planeGizmo?.dragging) return
       if (this.plateMode && this.plateGizmo?.dragging) return
-
       if (this.plateMode && this.plateMoveMode) {
         const hits = this._raycaster.intersectObjects(
           this.piecesGroup.children.filter((m) => m.visible),
@@ -321,13 +322,23 @@ export class Viewer {
           false
         )
         const hit = hits[0]
-        if (!hit?.face) return
-        if (this.shapeMode) {
-            this._isBrushing = true
-            this.controls.enabled = false
-            this.onShapePick?.(hit.faceIndex, hit.object.userData.pieceId, false)
+        if (!hit?.face) {
+          // Clicking the void while painting ends the brush stroke (the
+          // selection stays) and gives the orbit controls back.
+          if (this.shapeMode && this._isBrushing) {
+            this._isBrushing = false
+            this.controls.enabled = true
           }
-        else if (this.planeMode)
+          return
+        }
+        if (this.shapeMode) {
+          // Seed click: start/replace the selection AND enter paint mode —
+          // from here the cursor brushes (accumulates) until the user
+          // clicks the void or leaves the tool.
+          this._isBrushing = true
+          this.controls.enabled = false
+          this.onShapePick?.(hit.faceIndex, hit.object.userData.pieceId, false)
+        } else if (this.planeMode)
           this.onPlanePick?.(hit.point.clone(), hit.face.normal.clone())
         else this.onFacePick?.(hit.face.normal.clone(), hit.object.userData.pieceId)
         return
@@ -346,6 +357,7 @@ export class Viewer {
         }
       }
       this.onPieceClick?.(best?.id ?? null)
+      this.onSelect?.(best?.id ?? null)
     })
 
     this._onResize = () => {
@@ -762,9 +774,14 @@ export class Viewer {
     }
     this._clearHover()
     this._pinPreviewGroup.clear()
+    if (this._pinPreviewGeo) this._pinPreviewGeo.dispose()
+    if (this._pinPreviewMat) this._pinPreviewMat.dispose()
+    this._pinPreviewGeo = this._pinPreviewMat = null
     if (!pins?.length) return
     const geo = new THREE.CylinderGeometry(pinDiameter / 2, pinDiameter / 2, pinLength, 24)
     const mat = new THREE.MeshBasicMaterial({ color: 0xffb347, transparent: true, opacity: 0.9 })
+    this._pinPreviewGeo = geo
+    this._pinPreviewMat = mat
     this._pinBaseMat = mat
     this._pinHoverMat = new THREE.MeshBasicMaterial({ color: 0xffe08a })
     const tilt = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0))
@@ -875,8 +892,200 @@ export class Viewer {
     }
   }
 
+  // === Bounded limitation plate ===
+  // A posed quad (width × height in local XY, normal = local +Z) plus a very
+  // faint box showing the actual cut volume (±PLATE_DEPTH/2 along the
+  // normal), matching computePlateTransform's depth in App.jsx.
+  showPlate(pos, rot, width, height, showGizmo = false) {
+    if (!this.plateObj) {
+      this.plateObj = new THREE.Mesh(
+        new THREE.PlaneGeometry(1, 1),
+        new THREE.MeshBasicMaterial({
+          color: 0xff9900,
+          transparent: true,
+          opacity: 0.18,
+          side: THREE.DoubleSide,
+          depthWrite: false
+        })
+      )
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.PlaneGeometry(1, 1)),
+        new THREE.LineBasicMaterial({ color: 0xff9900 })
+      )
+      this.plateObj.add(edges)
+      this.plateVol = new THREE.Mesh(
+        new THREE.BoxGeometry(1, 1, 1),
+        new THREE.MeshBasicMaterial({
+          color: 0xff9900,
+          transparent: true,
+          opacity: 0.05,
+          depthWrite: false
+        })
+      )
+      this.plateVol.scale.set(1, 1, 400) // world (w, h, 400) via the parent
+      this.plateObj.add(this.plateVol)
+      this.scene.add(this.plateObj)
+
+      this.plateGizmo = new TransformControls(this.camera, this.renderer.domElement)
+      this.plateGizmo.setSize(0.85)
+      this.plateGizmoHelper = this.plateGizmo.getHelper()
+      this.scene.add(this.plateGizmoHelper)
+      this.plateGizmo.addEventListener('dragging-changed', (e) => {
+        this.controls.enabled = !e.value
+        if (!e.value) this._commitPlate()
+      })
+      this.plateGizmo.addEventListener('objectChange', () => this._commitPlate())
+    }
+    // Don't fight an ongoing gizmo drag with store round-trips.
+    if (!this.plateGizmo.dragging) {
+      this.plateObj.position.fromArray(pos)
+      this.plateObj.rotation.set(rot[0], rot[1], rot[2])
+      this.plateObj.scale.set(Math.max(1, width), Math.max(1, height), 1)
+    }
+    this.plateObj.visible = true
+    if (showGizmo) {
+      this.plateGizmo.attach(this.plateObj)
+      this.plateGizmoHelper.visible = true
+    } else {
+      this.plateGizmo.detach()
+      this.plateGizmoHelper.visible = false
+    }
+  }
+
+  _commitPlate() {
+    if (!this.plateObj) return
+    const e = this.plateObj.rotation
+    this.onPlateChange?.({
+      pos: this.plateObj.position.toArray(),
+      rot: [e.x, e.y, e.z],
+      width: Math.max(5, Math.abs(this.plateObj.scale.x)),
+      height: Math.max(5, Math.abs(this.plateObj.scale.y))
+    })
+  }
+
+  setPlateGizmoMode(mode) {
+    this.plateGizmo?.setMode(mode)
+  }
+
+  hidePlate() {
+    if (!this.plateObj) return
+    this.plateObj.visible = false
+    this.plateGizmo?.detach()
+    if (this.plateGizmoHelper) this.plateGizmoHelper.visible = false
+  }
+
+  // === Live section contour ===
+  // Orange intersection lines of the current plane/plate with the pieces,
+  // recomputed at most once per animation frame (plane drags fire often).
+  updateSectionContour(normal, origin, plateBounds = null) {
+    if (!this._contourLines) {
+      this._contourLines = new THREE.LineSegments(
+        new THREE.BufferGeometry(),
+        new THREE.LineBasicMaterial({
+          color: 0xffd166,
+          transparent: true,
+          opacity: 0.95,
+          depthTest: false
+        })
+      )
+      this._contourLines.frustumCulled = false
+      this._contourLines.renderOrder = 10
+      this.scene.add(this._contourLines)
+    }
+    this._contourLines.visible = true
+    this._contourArgs = { normal: normal.clone(), origin: origin.clone(), plateBounds }
+    if (this._contourRaf) return
+    this._contourRaf = requestAnimationFrame(() => {
+      this._contourRaf = 0
+      const args = this._contourArgs
+      if (!args || !this._contourLines || !this._contourLines.visible) return
+      const parts = []
+      let total = 0
+      for (const mesh of this.piecesGroup.children) {
+        if (!mesh.visible) continue
+        // Pieces carry their world position in the geometry; the explode
+        // slider offsets them via mesh.position — shift the plane (and the
+        // plate bounds) into the mesh frame, then translate the segments back.
+        const bounds = args.plateBounds
+          ? {
+              matrixWorldInverse: args.plateBounds.matrixWorldInverse
+                .clone()
+                .multiply(
+                  new THREE.Matrix4().makeTranslation(
+                    mesh.position.x,
+                    mesh.position.y,
+                    mesh.position.z
+                  )
+                ),
+              width: args.plateBounds.width,
+              height: args.plateBounds.height
+            }
+          : null
+        const segs = computeSectionSegments(
+          mesh.geometry,
+          args.normal,
+          args.origin.clone().sub(mesh.position),
+          bounds
+        )
+        if (segs.length) {
+          parts.push({ segs, mesh })
+          total += segs.length
+        }
+      }
+      const arr = new Float32Array(total)
+      let off = 0
+      for (const { segs, mesh } of parts) {
+        for (let i = 0; i < segs.length; i += 3) {
+          arr[off++] = segs[i] + mesh.position.x
+          arr[off++] = segs[i + 1] + mesh.position.y
+          arr[off++] = segs[i + 2] + mesh.position.z
+        }
+      }
+      this._contourLines.geometry.dispose()
+      this._contourLines.geometry = new THREE.BufferGeometry()
+      this._contourLines.geometry.setAttribute('position', new THREE.BufferAttribute(arr, 3))
+    })
+  }
+
+  hideSectionContour() {
+    if (this._contourLines) this._contourLines.visible = false
+  }
+
+  // === Tool-mode setters (kept explicit so App effects read clearly) ===
+  setFaceMode(on) {
+    this.faceMode = !!on
+    if (on) setTimeout(() => this.warmFaceCaches(), 30)
+    else this._setFaceHover(null)
+  }
+
+  setShapeMode(on) {
+    this.shapeMode = !!on
+    if (on) {
+      setTimeout(() => this.warmFaceCaches(), 30)
+    } else {
+      // Leaving the tool always ends a brush stroke and frees the controls.
+      this._isBrushing = false
+      this.controls.enabled = true
+    }
+  }
+
+  // Aliases: the orange selection overlay for the shape tool, the volume box
+  // and the puzzle connector markers.
+  setShapeOverlay(positions) {
+    this.setShapeHighlight(positions)
+  }
+
+  showVolume(on) {
+    this.setVolumeBox(!!on && this.piecesGroup.children.length > 0)
+  }
+
+  setPuzzlePins(pins, pinDiameter, pinLength) {
+    this.setPinPreview(pins, pinDiameter, pinLength)
+  }
+
   dispose() {
     cancelAnimationFrame(this._raf)
+    if (this._contourRaf) cancelAnimationFrame(this._contourRaf)
     window.removeEventListener('resize', this._onResize)
     this.renderer.dispose()
   }

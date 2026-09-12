@@ -102,10 +102,10 @@ export function App() {
   const viewerRef = useRef(null)
   const fileRef = useRef(null)
   const selectedIdRef = useRef(null)
-  const puzzlePlanesRef = useRef([])
-  const puzzleSectionsRef = useRef([])
-  const puzzlePinsRef = useRef([])
-  const puzzleSourceRef = useRef(null)
+  const puzzlePlanesRef = useRef([]) // posed planes matching planeIdx
+  const puzzleSectionsRef = useRef([]) // per-plane cross-section polygons
+  const puzzlePinsRef = useRef(null) // live mirror of puzzlePins (validator)
+  const puzzleSourceRef = useRef(null) // { pieces, ids } — regenerate from the original
 
   const [activeTool, setActiveTool] = useState(null)
   const [selectedId, setSelectedIdState] = useState(null)
@@ -121,10 +121,11 @@ export function App() {
   const [checked, setChecked] = useState({})
   const [volumeMode, setVolumeMode] = useState('translate')
   const [planeMode, setPlaneMode] = useState('translate')
+  const [plateGizmoMode, setPlateGizmoMode] = useState('rotate')
   const [pinPlacing, setPinPlacing] = useState(false)
   const [manualPins, setManualPins] = useState([])
-  const [puzzleEditMode, setPuzzleEditMode] = useState(false)
-  const [manualPuzzlePins, setManualPuzzlePins] = useState({})
+  const [pinPreviewOn, setPinPreviewOn] = useState(false)
+  const [puzzlePins, setPuzzlePins] = useState(null) // [{planeIdx, u, v, off}]
   const [ctxMenu, setCtxMenu] = useState(null)
   const [busyMsg, setBusyMsg] = useState(null)
 
@@ -184,10 +185,10 @@ export function App() {
     const piece = useStore.getState().pieces.find((p) => p.id === pieceId)
     if (!piece) return
     const res = growRegion(piece.geometry, faceIndex, sens, radius)
-    
+
     if (!isBrushing) {
       if (res.count >= res.triCount * 0.95) {
-        shapeSelRef.current = { pieceId, sel: null }
+        shapeSelRef.current = { pieceId, sel: null, count: res.count }
         setShapeMeta(null)
         viewerRef.current?.setShapeHighlight(null)
         useStore.getState().setError(makeT(useStore.getState().lang)('shapeWhole'))
@@ -195,44 +196,139 @@ export function App() {
       }
       shapeSelRef.current = { pieceId, sel: res.sel, count: res.count }
     } else {
-      // Brushing mode: accumulate selection!
+      // Brushing: union the freshly grown region into the current selection.
       if (!shapeSelRef.current || shapeSelRef.current.pieceId !== pieceId || !shapeSelRef.current.sel) {
         shapeSelRef.current = { pieceId, sel: res.sel, count: res.count }
       } else {
-        const curSel = shapeSelRef.current.sel;
-        let newCount = shapeSelRef.current.count;
+        const curSel = shapeSelRef.current.sel
+        let newCount = shapeSelRef.current.count
         for (let i = 0; i < res.sel.length; i++) {
           if (res.sel[i] && !curSel[i]) {
-            curSel[i] = 1;
-            newCount++;
+            curSel[i] = 1
+            newCount++
           }
         }
-        shapeSelRef.current.count = newCount;
+        shapeSelRef.current.count = newCount
       }
     }
     useStore.getState().setError(null)
     setShapeMeta({ pieceId, count: shapeSelRef.current.count })
-    viewerRef.current?.setShapeHighlight(regionPositions(piece.geometry, shapeSelRef.current.sel, shapeSelRef.current.count))
+    viewerRef.current?.setShapeHighlight(
+      regionPositions(piece.geometry, shapeSelRef.current.sel, shapeSelRef.current.count)
+    )
   }
 
-  const isDowelPiece = (p) => p.name.startsWith('dowel_') || p.name.startsWith('cavilha_') || p.name.startsWith('spinotto_')
-  const addDowelPiece = (count) => {
-    if (count <= 0) return
-    const d = s.cutParams.pinDiameter
-    const halfH = s.cutParams.pinLength / 2
-    const dowelGeo = new THREE.CylinderGeometry(d / 2, d / 2, halfH * 2, 32)
-    dowelGeo.rotateZ(Math.PI / 2)
-    dowelGeo.computeVertexNormals()
-    dowelGeo.computeBoundingBox()
-    const name = `spinotto_${d}x${s.cutParams.pinLength}mm`
-    useStore.getState().replacePiece(-1, [
-      {
-        id: newPieceId(),
-        name: count > 1 ? `${name}_x${count}` : name,
-        geometry: dowelGeo,
-        visible: true
+  const isDowelPiece = (p) =>
+    p.name.startsWith('spinotto_') ||
+    p.name.startsWith('tourillon_') ||
+    p.name.startsWith('dowel_') ||
+    p.name.startsWith('cavilha_')
+
+  // Printable dowels: the HOLES carry the tolerance, the dowel itself is the
+  // exact nominal diameter. One piece per size, count accumulated in its
+  // name, standing on the plate beside the model, excluded from later cuts.
+  function addDowelPiece(count) {
+    if (!count) return
+    const st = useStore.getState()
+    const cp = st.cutParams
+    const base = `spinotto_${cp.pinDiameter}x${cp.pinLength}`
+    const existing = st.pieces.find((x) => x.name.startsWith(base))
+    const prev = existing ? parseInt(existing.name.match(/_x(\d+)$/)?.[1] ?? '0', 10) : 0
+    const total = prev + count
+    const box = new THREE.Box3()
+    st.pieces.forEach((q) => {
+      if (isDowelPiece(q)) return
+      if (!q.geometry.boundingBox) q.geometry.computeBoundingBox()
+      box.union(q.geometry.boundingBox)
+    })
+    const g = new THREE.CylinderGeometry(cp.pinDiameter / 2, cp.pinDiameter / 2, cp.pinLength, 48)
+    g.translate((box.isEmpty() ? 0 : box.max.x) + 15 + cp.pinDiameter, cp.pinLength / 2, 0)
+    const name = `${base}_x${total}`
+    if (existing) {
+      useStore.getState().setPiecesBulk(
+        st.pieces.map((q) => (q === existing ? { ...q, name, geometry: g } : q))
+      )
+    } else {
+      useStore.getState().setPiecesBulk([
+        ...st.pieces,
+        { id: newPieceId(), name, geometry: g, visible: true }
+      ])
+    }
+  }
+
+  // === Puzzle tool helpers ===
+  function clearPinPreview() {
+    setPinPreviewOn(false)
+    setPuzzlePins(null)
+    viewerRef.current?.setPinPreview(null)
+    viewerRef.current?.setPiecesGhost(false)
+    if (viewerRef.current) viewerRef.current.puzzleEditMode = false
+  }
+
+  // World-space reservation segment for collision checks between connectors.
+  function pinReservation(planeIdx, u, v, off = 0) {
+    const plane = puzzlePlanesRef.current[planeIdx]
+    const p = useStore.getState().cutParams
+    const halfH = (p.pinLength + 2 * p.tolerance) / 2
+    const q = new THREE.Quaternion(...plane.quat)
+    const base = new THREE.Vector3(...plane.pos)
+    const toW = (z) => new THREE.Vector3(u, v, z).applyQuaternion(q).add(base).toArray()
+    return { a: toW(off - halfH), b: toW(off + halfH), r: p.pinDiameter / 2 + p.tolerance }
+  }
+
+  function pinValid2D(planeIdx, u, v) {
+    const polys = puzzleSectionsRef.current[planeIdx]
+    if (!polys?.length) return false
+    const p = useStore.getState().cutParams
+    return pinFits2D(polys, u, v, p.pinDiameter / 2 + p.tolerance + 1.5)
+  }
+
+  function collidesWithOthers(pins, selfIdx, planeIdx, u, v, off) {
+    const res = pinReservation(planeIdx, u, v, off)
+    return pins.some((pin, i) => {
+      if (i === selfIdx) return false
+      return reservationsCollide(res, pinReservation(pin.planeIdx, pin.u, pin.v, pin.off))
+    })
+  }
+
+  // Compute where the puzzle's connectors will land (same engine as the
+  // cut) and show them as orange ghosts through transparent pieces.
+  async function onPreviewPins() {
+    const st = useStore.getState()
+    s.setBusy(true)
+    s.setError(null)
+    try {
+      const box = new THREE.Box3()
+      st.pieces.forEach((p) => {
+        if (!p.geometry.boundingBox) p.geometry.computeBoundingBox()
+        box.union(p.geometry.boundingBox)
+      })
+      const planes = puzzlePlanes(box, blockSize).map(({ axis, offset }) => {
+        const pos = [0, 0, 0]
+        pos[{ x: 0, y: 1, z: 2 }[axis]] = offset
+        return { pos, quat: AXIS_QUATS[axis] }
+      })
+      puzzlePlanesRef.current = planes
+      const all = []
+      const sections = []
+      for (const piece of st.pieces.filter((p) => p.visible)) {
+        const res = await pinPreviewAsync(piece.geometry, planes, st.cutParams)
+        all.push(...res.pins)
+        res.sections.forEach((polys, i) => {
+          sections[i] = [...(sections[i] ?? []), ...(polys ?? [])]
+        })
       }
-    ])
+      puzzleSectionsRef.current = sections
+      setPuzzlePins(all.map(({ planeIdx, u, v, off }) => ({ planeIdx, u, v, off })))
+      viewerRef.current.setPiecesGhost(true)
+      viewerRef.current.puzzleEditMode = true
+      setPinPreviewOn(true)
+    } catch (e) {
+      console.error(e)
+      s.setError(t('cutError'))
+    } finally {
+      s.setBusy(false)
+    }
   }
 
   // Model bounding box and active axis dimensions
@@ -282,60 +378,46 @@ export function App() {
     viewer.onRotateEnd = (q) => s.rotateModelQuaternion(q, selectedIdRef.current)
     viewer.onMoveEnd = (dx, dz) => s.translatePiece(selectedIdRef.current, dx, dz)
 
-    viewer.onPuzzlePinMove = (planeIdx, pinIdx, u, v) => {
-      const plane = puzzlePlanesRef.current[planeIdx]
-      const sec = puzzleSectionsRef.current[planeIdx]
-      if (!plane || !sec) return
-      const r = s.cutParams.pinDiameter / 2
-      const tol = s.cutParams.tolerance
-      const d = s.cutParams.spacing
-      const ok =
-        sec.polys.some((poly) => pinFits2D([u, v], poly, r + tol)) &&
-        !reservationsCollide(sec.occupied, [u, v], r, tol, d)
-      if (!ok) return false
-      setManualPuzzlePins((prev) => {
-        const cur = prev[planeIdx] ? [...prev[planeIdx]] : [...(puzzlePinsRef.current[planeIdx] ?? [])]
-        cur[pinIdx] = [u, v]
-        return { ...prev, [planeIdx]: cur }
-      })
-      return true
-    }
-
-    viewer.onPuzzlePinAdd = (planeIdx, u, v) => {
-      const sec = puzzleSectionsRef.current[planeIdx]
-      if (!sec) return
-      const r = s.cutParams.pinDiameter / 2
-      const tol = s.cutParams.tolerance
-      const d = s.cutParams.spacing
-      const ok =
-        sec.polys.some((poly) => pinFits2D([u, v], poly, r + tol)) &&
-        !reservationsCollide(sec.occupied, [u, v], r, tol, d)
-      if (!ok) return
-      setManualPuzzlePins((prev) => {
-        const cur = prev[planeIdx] ? [...prev[planeIdx]] : [...(puzzlePinsRef.current[planeIdx] ?? [])]
-        cur.push([u, v])
-        return { ...prev, [planeIdx]: cur }
-      })
-    }
-
-    viewer.onPuzzlePinRemove = (planeIdx, pinIdx) => {
-      setManualPuzzlePins((prev) => {
-        const cur = prev[planeIdx] ? [...prev[planeIdx]] : [...(puzzlePinsRef.current[planeIdx] ?? [])]
-        cur.splice(pinIdx, 1)
-        return { ...prev, [planeIdx]: cur }
-      })
-    }
-
-    viewer.puzzlePinValidator = (planeIdx, u, v) => {
-      const sec = puzzleSectionsRef.current[planeIdx]
-      if (!sec) return false
-      const r = s.cutParams.pinDiameter / 2
-      const tol = s.cutParams.tolerance
-      const d = s.cutParams.spacing
-      return (
-        sec.polys.some((poly) => pinFits2D([u, v], poly, r + tol)) &&
-        !reservationsCollide(sec.occupied, [u, v], r, tol, d)
+    // Infinite-plane mode: clicking the model snaps the cut plane onto the
+    // clicked surface (position + orientation from the face normal).
+    viewer.onPlanePick = (point, normal) => {
+      const quat = new THREE.Quaternion().setFromUnitVectors(
+        new THREE.Vector3(0, 0, 1),
+        normal.clone().normalize()
       )
+      useStore.getState().setPlane({ pos: [point.x, point.y, point.z], quat: quat.toArray() })
+    }
+
+    // Editable puzzle connectors: add on plane click, remove on marker
+    // click, move by dragging — all collision-guarded.
+    viewer.onPuzzlePinAdd = (planeIdx, u, v) => {
+      setPuzzlePins((pins) => {
+        if (!pins) return pins
+        if (!pinValid2D(planeIdx, u, v)) return pins
+        if (collidesWithOthers(pins, -1, planeIdx, u, v, 0)) return pins
+        return [...pins, { planeIdx, u, v, off: 0 }]
+      })
+    }
+    // Live drag constraint: the marker only follows while inside the
+    // material (2D section + wall margin) and away from other connectors.
+    viewer.puzzlePinValidator = (pinIdx, planeIdx, u, v) => {
+      if (!pinValid2D(planeIdx, u, v)) return false
+      const pins = puzzlePinsRef.current
+      if (!pins) return true
+      const pin = pins[pinIdx]
+      return !collidesWithOthers(pins, pinIdx, planeIdx, u, v, pin?.off ?? 0)
+    }
+    viewer.onPuzzlePinRemove = (idx) => {
+      setPuzzlePins((pins) => (pins ? pins.filter((_, i) => i !== idx) : pins))
+    }
+    viewer.onPuzzlePinMove = (idx, u, v) => {
+      setPuzzlePins((pins) => {
+        if (!pins) return pins
+        const pin = pins[idx]
+        if (!pin) return pins
+        if (collidesWithOthers(pins, idx, pin.planeIdx, u, v, pin.off ?? 0)) return [...pins]
+        return pins.map((q, i) => (i === idx ? { ...q, u, v } : q))
+      })
     }
 
     viewer.onPinPick = (u, v) => {
@@ -346,8 +428,8 @@ export function App() {
       })
     }
 
-    viewer.onShapePick = (faceIdx, pieceId) => {
-      setShapeSeed({ faceIdx, pieceId })
+    viewer.onShapePick = (faceIdx, pieceId, isBrushing) => {
+      setShapeSeed({ faceIdx, pieceId, isBrushing: !!isBrushing })
     }
 
     viewer.onContextMenu = (x, y) => setCtxMenu({ x, y })
@@ -379,7 +461,8 @@ export function App() {
 
   useEffect(() => {
     if (!s.pieces.length && !s.modelName) {
-      fetch('/ratome.stl')
+      // BASE_URL keeps this working under GitHub Pages sub-paths.
+      fetch(import.meta.env.BASE_URL + 'ratome.stl')
         .then((r) => (r.ok ? r.blob() : Promise.reject()))
         .then((b) => loadFile(new File([b], 'ratome.stl')))
         .catch(() => {})
@@ -392,10 +475,10 @@ export function App() {
     try {
       const geometry = await importModelFile(file)
       s.setModel(file.name, geometry)
-      puzzleSourceRef.current = geometry.clone()
+      puzzleSourceRef.current = null // a new model resets puzzle regeneration
+      clearPinPreview()
       setSelectedId(1)
       setActiveTool(null)
-      setTimeout(() => viewerRef.current?.fitCamera(), 50)
     } catch (e) {
       console.error(e)
       s.setError(t('loadError', { name: file.name }))
@@ -404,15 +487,23 @@ export function App() {
     }
   }
 
+  // Camera refits only when a NEW model arrives, never on cuts/transforms.
+  const lastModelRef = useRef(null)
   useEffect(() => {
-    const viewer = viewerRef.current
-    if (!viewer) return
-    viewer.setPieces(s.pieces)
-    if (selectedId && !s.pieces.some((p) => p.id === selectedId)) {
-      const first = s.pieces.find((p) => p.visible)?.id ?? null
-      setSelectedId(first)
-    }
+    const refit = s.modelName !== lastModelRef.current
+    lastModelRef.current = s.modelName
+    viewerRef.current?.setPieces(s.pieces, s.explode, refit)
   }, [s.pieces])
+
+  // A lone piece is always the implicit selection; a selection whose piece
+  // vanished (cut, undo) falls back to the first visible piece.
+  useEffect(() => {
+    if (s.pieces.length === 1) {
+      setSelectedId(s.pieces[0].id)
+    } else if (selectedId != null && !s.pieces.some((p) => p.id === selectedId)) {
+      setSelectedId(s.pieces.find((p) => p.visible)?.id ?? null)
+    }
+  }, [s.pieces, selectedId])
 
   useEffect(() => {
     viewerRef.current?.setSelected(selectedId)
@@ -424,11 +515,18 @@ export function App() {
       const mod = e.metaKey || e.ctrlKey
       if (mod && e.key.toLowerCase() === 'z') {
         e.preventDefault()
-        if (e.shiftKey) s.redo()
-        else s.undo()
+        if (e.shiftKey) useStore.getState().redo()
+        else useStore.getState().undo()
       } else if (mod && e.key.toLowerCase() === 'y') {
         e.preventDefault()
-        s.redo()
+        useStore.getState().redo()
+      } else if (e.key === 'Escape') {
+        setPinPlacing((placing) => {
+          if (placing) return false
+          setActiveTool(null)
+          setCtxMenu(null)
+          return placing
+        })
       } else if (!mod && e.key >= '1' && e.key <= String(TOOLBAR.length)) {
         const idx = parseInt(e.key, 10) - 1
         const tool = TOOLBAR[idx][0]
@@ -448,18 +546,23 @@ export function App() {
   }, [planeMode])
 
   useEffect(() => {
+    viewerRef.current?.setPlateGizmoMode(plateGizmoMode)
+  }, [plateGizmoMode])
+
+  useEffect(() => {
     if (activeTool !== 'plane' && activeTool !== 'volume') return
     const onKey = (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return
       const k = e.key.toLowerCase()
-      if (k !== 't' && k !== 'r') return
-      const mode = k === 't' ? 'translate' : 'rotate'
-      if (activeTool === 'plane') setPlaneMode(mode)
-      else setVolumeMode(mode)
+      if (k !== 't' && k !== 'r' && k !== 's') return
+      const mode = k === 't' ? 'translate' : k === 'r' ? 'rotate' : 'scale'
+      if (activeTool === 'volume') setVolumeMode(mode)
+      else if (s.planeCutMode === 'plate') setPlateGizmoMode(mode)
+      else if (mode !== 'scale') setPlaneMode(mode)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [activeTool])
+  }, [activeTool, s.planeCutMode])
 
   async function onVolumeCut() {
     s.setBusy(true)
@@ -582,47 +685,92 @@ export function App() {
       setManualPins([])
     }
     setModelOpen(!activeTool || TRANSFORM_TOOLS.has(activeTool))
+    // Opening the puzzle on a model smaller than the default blocks would
+    // yield "1 block" and feel broken — propose sizes that actually split.
     if (activeTool === 'puzzle' && dims) {
-      const est = Math.max(dims.x, dims.y, dims.z)
-      if (est < defaultBlock) {
-        const fit = Math.max(20, Math.round(est / 2 / 10) * 10)
-        setBlockSizeState({ x: fit, y: fit, z: fit })
+      const est =
+        Math.ceil(dims.x / Math.max(1, blockSize.x)) *
+        Math.ceil(dims.y / Math.max(1, blockSize.y)) *
+        Math.ceil(dims.z / Math.max(1, blockSize.z))
+      if (est <= 1) {
+        setBlockSizeState({
+          x: Math.max(10, Math.ceil(dims.x / 2 / 5) * 5),
+          y: Math.max(10, Math.ceil(dims.y / 2 / 5) * 5),
+          z: Math.max(10, Math.ceil(dims.z / 2 / 5) * 5)
+        })
       }
     }
-    viewerRef.current?.setGizmo(activeTool === 'rotate' ? selectedId : null)
-    viewerRef.current?.setMoveGizmo(activeTool === 'move' ? selectedId : null)
     viewerRef.current?.setFaceMode(activeTool === 'face')
     viewerRef.current?.setShapeMode(activeTool === 'shape')
     viewerRef.current?.showVolume(activeTool === 'volume')
-    if (activeTool !== 'puzzle') {
-      viewerRef.current?.setPuzzlePreview(null)
-      viewerRef.current?.setPuzzlePins(null)
-      setPuzzleEditMode(false)
-      setManualPuzzlePins({})
-    }
+    if (activeTool !== 'puzzle') clearPinPreview()
     if (activeTool !== 'shape') {
-      viewerRef.current?.setShapeOverlay(null)
+      clearShapeSel()
       setShapeSeed(null)
-      setShapeMeta(null)
     }
-  }, [activeTool, selectedId])
+  }, [activeTool])
 
-  
   useEffect(() => {
-    if (!shapeSeed) return
-    runShapeSelection(shapeSeed.pieceId, shapeSeed.faceIdx, shapeSens, effRadius, shapeSeed.isBrushing)
-  }, [shapeSeed, shapeSens, effRadius])
+    viewerRef.current?.setGizmo(activeTool === 'rotate' ? selectedId : null)
+  }, [activeTool, selectedId, s.pieces])
 
-  const revealCut = () => {
-    if (!s.pieces.length) return
+  useEffect(() => {
+    viewerRef.current?.setMoveGizmo(activeTool === 'move' ? selectedId : null)
+  }, [activeTool, selectedId, s.pieces])
+
+  // Live preview of the puzzle grid while the tool is open.
+  useEffect(() => {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    if (activeTool !== 'puzzle' || !s.pieces.length) {
+      viewer.setPuzzlePreview(null)
+      return
+    }
     const box = new THREE.Box3()
     s.pieces.forEach((p) => {
       if (!p.geometry.boundingBox) p.geometry.computeBoundingBox()
       box.union(p.geometry.boundingBox)
     })
-    const sz = box.getSize(new THREE.Vector3()).length()
-    const target = Math.max(6, Math.min(60, Math.round(sz * 0.08)))
-    s.setExplode(target)
+    viewer.setPuzzlePreview(puzzlePlanes(box, blockSize), box)
+    return () => viewer.setPuzzlePreview(null)
+  }, [activeTool, blockSize, s.pieces])
+
+  // Render the orange markers from the editable pin list.
+  useEffect(() => {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    if (!puzzlePins) {
+      viewer.setPinPreview(null)
+      return
+    }
+    const p = s.cutParams
+    const pins = puzzlePins.map(({ planeIdx, u, v, off }) => {
+      const plane = puzzlePlanesRef.current[planeIdx]
+      const q = new THREE.Quaternion(...plane.quat)
+      const center = new THREE.Vector3(u, v, off ?? 0)
+        .applyQuaternion(q)
+        .add(new THREE.Vector3(...plane.pos))
+      return { center: center.toArray(), quat: plane.quat, plane, planeIdx }
+    })
+    viewer.setPinPreview(pins, p.pinDiameter, p.pinLength)
+  }, [puzzlePins, s.cutParams.pinDiameter, s.cutParams.pinLength])
+
+  useEffect(() => {
+    puzzlePinsRef.current = puzzlePins
+  }, [puzzlePins])
+
+  // Make the cut visible: gently explode the pieces (real mm, scaled to the
+  // model) — only when not already exploded, so the user's slider is law.
+  const revealCut = () => {
+    const st = useStore.getState()
+    if (st.explode !== 0) return
+    const box = new THREE.Box3()
+    st.pieces.forEach((p) => {
+      if (!p.geometry.boundingBox) p.geometry.computeBoundingBox()
+      box.union(p.geometry.boundingBox)
+    })
+    const sz = box.isEmpty() ? 100 : box.getSize(new THREE.Vector3()).length()
+    st.setExplode(Math.max(6, Math.min(60, Math.round(sz * 0.08))))
   }
 
   async function onCut() {
@@ -684,6 +832,94 @@ export function App() {
     }
   }
 
+  // Puzzle: slice the model into printable blocks along a regular grid,
+  // connectors added on every interface by the plane-cut engine.
+  async function onPuzzle() {
+    s.setBusy(true)
+    s.setError(null)
+    try {
+      const box = new THREE.Box3()
+      s.pieces.forEach((p) => {
+        if (!p.geometry.boundingBox) p.geometry.computeBoundingBox()
+        box.union(p.geometry.boundingBox)
+      })
+      const planes = puzzlePlanes(box, blockSize).map(({ axis, offset }) => {
+        const pos = [0, 0, 0]
+        pos[{ x: 0, y: 1, z: 2 }[axis]] = offset
+        return { axis, offset, pos, quat: AXIS_QUATS[axis] }
+      })
+      const edited = puzzlePins
+      const targets = s.pieces.filter((p) => p.visible && !isDowelPiece(p))
+      let kept = s.pieces.filter((p) => !p.visible || isDowelPiece(p))
+      let current = targets
+      // Re-clicking Generate must REGENERATE, never re-cut the previous
+      // blocks: if the targets are exactly the last generation, restart
+      // from the saved source and drop the previous dowel piece.
+      const src = puzzleSourceRef.current
+      if (src && targets.length && targets.every((p) => src.ids?.has(p.id))) {
+        current = src.pieces
+        kept = kept.filter((p) => !isDowelPiece(p))
+      } else {
+        puzzleSourceRef.current = { pieces: targets, ids: null }
+      }
+      let done = 0
+      let dowels = 0
+      for (let planeIdx = 0; planeIdx < planes.length; planeIdx++) {
+        const plane = planes[planeIdx]
+        const next = []
+        for (const piece of current) {
+          if (!piece.geometry.boundingBox) piece.geometry.computeBoundingBox()
+          const bb = piece.geometry.boundingBox
+          if (plane.offset <= bb.min[plane.axis] + 0.05 || plane.offset >= bb.max[plane.axis] - 0.05) {
+            next.push(piece)
+            continue
+          }
+          const parts = await planeCutAsync(piece.geometry, plane, {
+            ...s.cutParams,
+            manualPins: edited
+              ? edited.filter((pin) => pin.planeIdx === planeIdx).map(({ u, v }) => [u, v])
+              : undefined
+          })
+          dowels += parts.dowelCount ?? 0
+          if (parts.length < 2) next.push(piece)
+          else
+            parts.forEach((g) =>
+              next.push({ id: newPieceId(), name: piece.name, geometry: g, visible: true })
+            )
+        }
+        current = next
+        done++
+        setBusyMsg(`${done} / ${planes.length}`)
+      }
+      // Name blocks bottom layer first — stable reading order for assembly.
+      const base = (s.modelName || 'model').replace(/\.[^.]+$/, '')
+      const c = new THREE.Vector3()
+      current
+        .map((p) => {
+          p.geometry.computeBoundingBox()
+          p.geometry.boundingBox.getCenter(c)
+          return { p, y: c.y, z: c.z, x: c.x }
+        })
+        .sort((a, b) => a.y - b.y || a.z - b.z || a.x - b.x)
+        .forEach((e, i) => {
+          e.p.name = `${base}_${String(i + 1).padStart(2, '0')}`
+        })
+      useStore.getState().setPiecesBulk([...kept, ...current])
+      puzzleSourceRef.current.ids = new Set(current.map((p) => p.id))
+      addDowelPiece(dowels)
+      clearPinPreview()
+      revealCut()
+      viewerRef.current?.fitCamera?.()
+      setActiveTool(null)
+    } catch (e) {
+      console.error(e)
+      s.setError(t('cutError'))
+    } finally {
+      s.setBusy(false)
+      setBusyMsg(null)
+    }
+  }
+
   const [simplifyPct, setSimplifyPct] = useState(25)
   const triCount = s.pieces.reduce(
     (n, p) => n + (p.geometry.index ? p.geometry.index.count : p.geometry.attributes.position.count) / 3,
@@ -733,26 +969,34 @@ export function App() {
 
   const effRadius = Math.min(shapeRadius, Math.ceil(maxDim))
 
+  // shape tool live selection (must run after effRadius is declared)
+  useEffect(() => {
+    if (!shapeSeed) return
+    runShapeSelection(shapeSeed.pieceId, shapeSeed.faceIdx, shapeSens, effRadius, shapeSeed.isBrushing)
+  }, [shapeSeed, shapeSens, effRadius])
+
   async function onDetachShape() {
-    if (!shapeMeta || !shapeSeed) return
-    const piece = s.pieces.find((p) => p.id === shapeSeed.pieceId)
-    if (!piece) return
-    const selPos = regionPositions(piece.geometry, shapeSelRef.current.sel)
-    const { matrix } = regionOrientedBox(selPos)
+    const sh = shapeSelRef.current
+    if (!sh || !sh.sel) return
     s.setBusy(true)
     s.setError(null)
     try {
+      const piece = useStore.getState().pieces.find((p) => p.id === sh.pieceId)
+      if (!piece) return
+      const matrix = regionOrientedBox(piece.geometry, sh.sel)
+      if (!matrix) throw new Error('no boundary')
       const parts = await volumeCutAsync(piece.geometry, matrix)
       if (parts.length < 2) return
       useStore.getState().replacePiece(
         piece.id,
         parts.map((g, i) => ({
           id: newPieceId(),
-          name: `${piece.name.replace(/\.[^.]+$/, '')}_${i === 0 ? 'détail' : 'reste'}`,
+          name: `${piece.name.replace(/\.[^.]+$/, '')}_${i + 1}`,
           geometry: g,
           visible: true
         }))
       )
+      clearShapeSel()
       setActiveTool(null)
       revealCut()
     } catch (e) {
@@ -867,7 +1111,7 @@ export function App() {
         </div>
       </header>
 
-      <main>
+      <main className="main">
         <div className="viewport">
           <canvas ref={canvasRef} />
 
@@ -983,7 +1227,14 @@ export function App() {
 
                       {/* Graduated Millimeter Ruler Slider */}
                       <CutPositionRuler
-                        value={s.cutPlaneOffset}
+                        value={Math.min(
+                          0.99,
+                          Math.max(
+                            0.01,
+                            (s.plane.pos[{ x: 0, y: 1, z: 2 }[s.cutPlaneAxis] ?? 1] - axisMin) /
+                              axisSpan
+                          )
+                        )}
                         onChange={(v) => s.setCutPlaneOffset(v)}
                         modelSize={axisSpan}
                         minVal={axisMin}
@@ -1048,6 +1299,25 @@ export function App() {
                           </>
                         )}
                       </div>
+
+                      {/* Gizmo mode: translate / rotate / scale (T/R/S) */}
+                      {!s.plateMoveMode && (
+                        <div className="axis-row" style={{ marginTop: 8 }}>
+                          {[
+                            ['translate', t('modeMove')],
+                            ['rotate', t('modeRotate')],
+                            ['scale', t('modeScale')]
+                          ].map(([mode, label]) => (
+                            <button
+                              key={mode}
+                              className={plateGizmoMode === mode ? 'active' : ''}
+                              onClick={() => setPlateGizmoMode(mode)}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
 
                       {/* Position X Y Z */}
                       <div className="cut-plate-field-block">
@@ -1579,6 +1849,94 @@ export function App() {
                     ))}
                   </div>
                 </label>
+                <div className="dims">{t('blockSizeHint')}</div>
+                {dims && (
+                  <div className="dims">
+                    {t('blocksEstimate', {
+                      n:
+                        Math.ceil(dims.x / Math.max(1, blockSize.x)) *
+                        Math.ceil(dims.y / Math.max(1, blockSize.y)) *
+                        Math.ceil(dims.z / Math.max(1, blockSize.z))
+                    })}
+                  </div>
+                )}
+                <label>
+                  {t('connector')}
+                  <div className="axis-row">
+                    {[
+                      ['dowel', t('connDowel')],
+                      ['pin', t('connPin')],
+                      ['square', t('connSquare')],
+                      ['hex', t('connHex')]
+                    ].map(([type, label]) => (
+                      <button
+                        key={type}
+                        className={s.cutParams.connectorType === type ? 'active' : ''}
+                        onClick={() => s.setConnectorType(type)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </label>
+                <label>
+                  {t(['square', 'hex'].includes(s.cutParams.connectorType) ? 'pinWidth' : 'pinDiameter')}
+                  <input
+                    type="number"
+                    min="1"
+                    step="0.5"
+                    value={s.cutParams.pinDiameter}
+                    onChange={(e) => s.setCutParams({ pinDiameter: +e.target.value })}
+                  />
+                </label>
+                <label>
+                  {t('pinLength')}
+                  <input
+                    type="number"
+                    min="2"
+                    step="0.5"
+                    value={s.cutParams.pinLength}
+                    onChange={(e) => s.setCutParams({ pinLength: +e.target.value })}
+                  />
+                </label>
+                <label>
+                  {t('tolerance')}
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.05"
+                    value={s.cutParams.tolerance}
+                    onChange={(e) => s.setCutParams({ tolerance: +e.target.value })}
+                  />
+                </label>
+                <label>
+                  {t('spacing')}
+                  <input
+                    type="number"
+                    min="5"
+                    step="5"
+                    value={s.cutParams.spacing}
+                    onChange={(e) => s.setCutParams({ spacing: +e.target.value })}
+                  />
+                </label>
+                <button
+                  className={pinPreviewOn ? 'active' : ''}
+                  disabled={s.busy}
+                  onClick={() => (pinPreviewOn ? clearPinPreview() : onPreviewPins())}
+                >
+                  {pinPreviewOn ? t('hidePins') : t('previewPins')}
+                </button>
+                {pinPreviewOn && (
+                  <>
+                    <div className="dims">{t('pinsPlaced', { n: puzzlePins?.length ?? 0 })}</div>
+                    <div className="dims">{t('hintMove')}</div>
+                    <div className="dims">{t('hintRemove')}</div>
+                    <div className="dims">{t('hintAdd')}</div>
+                  </>
+                )}
+                <button className="primary" disabled={s.busy} onClick={onPuzzle}>
+                  {s.busy ? busyMsg || t('cutting') : t('generate')}
+                </button>
               </section>
             )}
 

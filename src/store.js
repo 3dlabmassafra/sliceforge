@@ -107,7 +107,7 @@ export const useStore = create((set, get) => ({
 
   cutPlaneAxis: 'y', // 'x' | 'y' | 'z'
   setCutPlaneAxis: (axis) => {
-    const { pieces, cutPlaneOffset, cutPlaneFlip } = get()
+    const { pieces, cutPlaneOffset, cutPlaneFlip, plane } = get()
     if (!pieces.length) {
       set({ cutPlaneAxis: axis })
       return
@@ -119,16 +119,27 @@ export const useStore = create((set, get) => ({
         box.union(p.geometry.boundingBox)
       }
     })
-    const { pos, quat } = computePlaneFromBBox(box, axis, cutPlaneOffset, cutPlaneFlip)
+    // Keep the current relative position when switching axis: derive the
+    // ratio from where the plane sits on the OLD axis, not from a stale state.
+    const oldAxis = cutPlaneAxis
+    const oldMin = box.min[oldAxis]
+    const oldSpan = Math.max(1e-6, box.max[oldAxis] - oldMin)
+    // plane.pos is an array — index it by axis position, not by name
+    const axIdx = { x: 0, y: 1, z: 2 }[oldAxis] ?? 1
+    const ratio = Math.min(1, Math.max(0, (plane.pos[axIdx] - oldMin) / oldSpan))
+    const { pos, quat } = computePlaneFromBBox(box, axis, ratio, cutPlaneFlip)
     set({
       cutPlaneAxis: axis,
+      cutPlaneOffset: ratio,
       plane: { pos, quat }
     })
   },
 
   cutPlaneOffset: 0.5,
+  // Slide the plane along the current axis ONLY — a tilted plane (rotated
+  // with the gizmo or snapped to a face) keeps its orientation.
   setCutPlaneOffset: (offset) => {
-    const { pieces, cutPlaneAxis, cutPlaneFlip } = get()
+    const { pieces, cutPlaneAxis, cutPlaneFlip, plane } = get()
     if (!pieces.length) {
       set({ cutPlaneOffset: offset })
       return
@@ -140,33 +151,22 @@ export const useStore = create((set, get) => ({
         box.union(p.geometry.boundingBox)
       }
     })
-    const { pos, quat } = computePlaneFromBBox(box, cutPlaneAxis, offset, cutPlaneFlip)
-    set({
-      cutPlaneOffset: offset,
-      plane: { pos, quat }
-    })
+    const { pos } = computePlaneFromBBox(box, cutPlaneAxis, offset, cutPlaneFlip)
+    set({ cutPlaneOffset: offset, plane: { pos, quat: plane.quat } })
   },
 
   cutPlaneFlip: false,
+  // Flip = rotate 180° about the plane's local X axis: the normal inverts
+  // while any user tilt is preserved (canonical axis quats land exactly on
+  // the preset inverse quats).
   toggleCutPlaneFlip: () => {
-    const { pieces, cutPlaneAxis, cutPlaneOffset, cutPlaneFlip } = get()
-    const nextFlip = !cutPlaneFlip
-    if (!pieces.length) {
-      set({ cutPlaneFlip: nextFlip })
-      return
-    }
-    const box = new THREE.Box3()
-    pieces.forEach((p) => {
-      if (p.geometry) {
-        if (!p.geometry.boundingBox) p.geometry.computeBoundingBox()
-        box.union(p.geometry.boundingBox)
-      }
-    })
-    const { pos, quat } = computePlaneFromBBox(box, cutPlaneAxis, cutPlaneOffset, nextFlip)
-    set({
-      cutPlaneFlip: nextFlip,
-      plane: { pos, quat }
-    })
+    const { plane } = get()
+    const flipQ = new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3(1, 0, 0),
+      Math.PI
+    )
+    const nextQuat = new THREE.Quaternion(...plane.quat).multiply(flipQ).toArray()
+    set((s) => ({ cutPlaneFlip: !s.cutPlaneFlip, plane: { ...s.plane, quat: nextQuat } }))
   },
 
   // Bounded limitation plate state
