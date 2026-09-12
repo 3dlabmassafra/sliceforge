@@ -16,6 +16,429 @@ async function getWasm() {
   return wasmPromise
 }
 
+/**
+ * Fix inconsistent triangle winding on a WELDED mesh (flipped patches in the
+ * source STL survive Manifold's weld and end up in every cut piece — slicers
+ * hate them). Breadth-first orientation propagation across shared edges;
+ * the global sense is then chosen so the signed volume is positive (normals
+ * outward). Returns corrected triVerts, or null when the mesh is not a
+ * repairable closed 2-manifold (degenerate/non-manifold edges, conflicts).
+ */
+/**
+ * Repair a broken source mesh (flipped patches, coincident duplicate
+ * triangles, degenerate faces) on the WELDED topology, before it reaches
+ * the boolean engine — otherwise every defect survives into every cut
+ * piece and slicers choke on it. Steps:
+ *   1. apply Manifold's weld mapping (mergeFromVert -> mergeToVert),
+ *   2. drop degenerate and coincident-duplicate triangles,
+ *   3. BFS-propagate a consistent winding across shared edges,
+ *   4. flip globally so the signed volume is positive (normals outward).
+ * Returns { vertProperties, triVerts } in compact welded indexing, or null
+ * when the mesh is not a repairable closed 2-manifold.
+ */
+/**
+ * Repair a broken source mesh (flipped patches, coincident duplicate
+ * triangles, degenerate faces, sliver "fins" on shared edges) on the WELDED
+ * topology before it reaches the boolean engine — otherwise every defect
+ * survives into every cut piece and slicers choke on it. Steps:
+ *   1. apply Manifold's weld mapping (mergeFromVert -> mergeToVert),
+ *   2. drop degenerate and coincident-duplicate triangles,
+ *   3. iteratively remove sliver faces from edges with 3+ incident faces,
+ *   4. BFS-propagate a consistent winding across shared edges,
+ *   5. flip globally so the signed volume is positive (normals outward).
+ * Returns { vertProperties, triVerts } in compact welded indexing, or null
+ * when the mesh is not repairable (the caller then keeps Manifold's best
+ * effort, exactly as before this repair existed).
+ */
+/**
+ * Repair a broken source mesh (flipped patches, coincident duplicate
+ * triangles, degenerate faces, sliver "fins" on shared edges) on the WELDED
+ * topology before it reaches the boolean engine — otherwise every defect
+ * survives into every cut piece and slicers choke on it. Steps:
+ *   1. apply Manifold's weld mapping (mergeFromVert -> mergeToVert),
+ *   2. drop degenerate and coincident-duplicate triangles,
+ *   3. iteratively collapse short multi-use edges / sliver apexes,
+ *   4. fan-fill the tiny boundary loops the collapses leave behind,
+ *   5. BFS-propagate a consistent winding across shared edges,
+ *   6. flip globally so the signed volume is positive (normals outward).
+ * Returns { vertProperties, triVerts } in compact welded indexing, or null
+ * when the mesh is not repairable (the caller then keeps Manifold's best
+ * effort, exactly as before this repair existed).
+ */
+function repairMesh(mesh) {
+  const numProp = mesh.numProp
+  const props = mesh.vertProperties
+  const n0 = props.length / numProp
+  const F0 = mesh.triVerts.length / 3
+  if (F0 < 4 || n0 < 4) return null
+
+  // 1. welded indices (still in original vertex numbering)
+  const map = new Uint32Array(n0)
+  for (let i = 0; i < n0; i++) map[i] = i
+  const mf = mesh.mergeFromVert
+  const mt = mesh.mergeToVert
+  if (mf && mt) for (let i = 0; i < mf.length; i++) map[mf[i]] = mt[i]
+
+  // 2. drop degenerate + duplicate triangles (keyed on the sorted triple)
+  const seen = new Set()
+  const keep = []
+  for (let t = 0; t < F0; t++) {
+    const a = map[mesh.triVerts[t * 3]]
+    const b = map[mesh.triVerts[t * 3 + 1]]
+    const c = map[mesh.triVerts[t * 3 + 2]]
+    if (a === b || b === c || a === c) continue
+    let s0, s1, s2
+    if (a < b) {
+      if (b < c) { s0 = a; s1 = b; s2 = c }
+      else if (a < c) { s0 = a; s1 = c; s2 = b }
+      else { s0 = c; s1 = a; s2 = b }
+    } else {
+      if (a < c) { s0 = b; s1 = a; s2 = c }
+      else if (b < c) { s0 = b; s1 = c; s2 = a }
+      else { s0 = c; s1 = b; s2 = a }
+    }
+    const key = s0 + ',' + s1 + ',' + s2
+    if (seen.has(key)) continue
+    seen.add(key)
+    keep.push(a, b, c)
+  }
+  if (keep.length / 3 < 4 || keep.length < F0 * 3 * 0.5) return null
+
+  // compact welded vertex numbering
+  const compact = new Int32Array(n0).fill(-1)
+  const outProps = []
+  let next = 0
+  const tri0 = new Uint32Array(keep.length)
+  for (let i = 0; i < keep.length; i++) {
+    const v = keep[i]
+    if (compact[v] < 0) {
+      compact[v] = next++
+      for (let pr = 0; pr < numProp; pr++) outProps.push(props[v * numProp + pr])
+    }
+    tri0[i] = compact[v]
+  }
+  let V = next
+  const px = (v) => outProps[v * numProp]
+  const py = (v) => outProps[v * numProp + 1]
+  const pz = (v) => outProps[v * numProp + 2]
+  const faceArea = (t, T) => {
+    const a = [px(T[t * 3]), py(T[t * 3]), pz(T[t * 3])]
+    const b = [px(T[t * 3 + 1]), py(T[t * 3 + 1]), pz(T[t * 3 + 1])]
+    const c = [px(T[t * 3 + 2]), py(T[t * 3 + 2]), pz(T[t * 3 + 2])]
+    const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+    const w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]]
+    return Math.hypot(u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]) / 2
+  }
+  const eps = (() => {
+    let minX = Infinity, minY = Infinity, minZ = Infinity
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
+    for (let v = 0; v < V; v++) {
+      const x = px(v), y = py(v), z = pz(v)
+      if (x < minX) minX = x
+      if (x > maxX) maxX = x
+      if (y < minY) minY = y
+      if (y > maxY) maxY = y
+      if (z < minZ) minZ = z
+      if (z > maxZ) maxZ = z
+    }
+    const d = Math.hypot(maxX - minX, maxY - minY, maxZ - minZ)
+    return Math.max(1e-4, d * 0.01) // 1% of the diagonal
+  })()
+
+  const buildUses = (tri, F) => {
+    const uses = new Map()
+    for (let t = 0; t < F; t++) {
+      for (let e = 0; e < 3; e++) {
+        const a = tri[t * 3 + e]
+        const b = tri[t * 3 + ((e + 1) % 3)]
+        const fwd = a < b
+        const k = fwd ? a * V + b : b * V + a
+        let list = uses.get(k)
+        if (!list) uses.set(k, (list = []))
+        list.push({ t, fwd, a, b, area: faceArea(t, tri) })
+      }
+    }
+    return uses
+  }
+
+  // 3. collapse loop: short multi-use edges collapse whole (the cleanest
+  // kill for a sliver fan); on long edges the extra faces' apexes collapse
+  // to the nearest endpoint instead. Degenerate / duplicate results drop.
+  let tri = tri0
+  let F = tri.length / 3
+  for (let iter = 0; iter < 12; iter++) {
+    const uses = buildUses(tri, F)
+    const remap = new Int32Array(V).fill(-1)
+    let planned = 0
+    for (const [k, list] of uses) {
+      if (list.length <= 2) continue
+      const lo = Math.floor(k / V)
+      const hi = k % V
+      const dEdge = (px(lo) - px(hi)) ** 2 + (py(lo) - py(hi)) ** 2 + (pz(lo) - pz(hi)) ** 2
+      if (dEdge <= eps * eps && remap[lo] === -1 && lo !== hi) {
+        remap[lo] = hi
+        planned++
+        continue
+      }
+      list.sort((x, y) => y.area - x.area)
+      const fwd = list.find((u) => u.fwd)
+      const bwd = list.find((u) => !u.fwd)
+      const survivors = fwd && bwd ? [fwd, bwd] : [list[0], list[1]]
+      for (const u of list) {
+        if (survivors.includes(u)) continue
+        const apex =
+          tri[u.t * 3] !== u.a && tri[u.t * 3] !== u.b
+            ? tri[u.t * 3]
+            : tri[u.t * 3 + 1] !== u.a && tri[u.t * 3 + 1] !== u.b
+              ? tri[u.t * 3 + 1]
+              : tri[u.t * 3 + 2]
+        const dLo = (px(apex) - px(lo)) ** 2 + (py(apex) - py(lo)) ** 2 + (pz(apex) - pz(lo)) ** 2
+        const dHi = (px(apex) - px(hi)) ** 2 + (py(apex) - py(hi)) ** 2 + (pz(apex) - pz(hi)) ** 2
+        const target = dLo <= dHi ? lo : hi
+        if (Math.min(dLo, dHi) <= eps * eps && remap[apex] === -1 && apex !== target) {
+          remap[apex] = target
+          planned++
+        }
+      }
+    }
+    if (!planned) {
+      let multiLeft = false
+      for (const list of uses.values()) if (list.length > 2) multiLeft = true
+      if (multiLeft) return null
+      break
+    }
+    for (let v = 0; v < V; v++) {
+      let t = remap[v]
+      if (t < 0) continue
+      let guard = 0
+      while (remap[t] >= 0 && guard++ < 32) t = remap[t]
+      remap[v] = t
+    }
+    const seenTri = new Set()
+    const rebuilt = []
+    for (let t = 0; t < F; t++) {
+      let a = tri[t * 3]
+      let b = tri[t * 3 + 1]
+      let c = tri[t * 3 + 2]
+      if (remap[a] >= 0) a = remap[a]
+      if (remap[b] >= 0) b = remap[b]
+      if (remap[c] >= 0) c = remap[c]
+      if (a === b || b === c || a === c) continue
+      const s = [a, b, c].sort((x, y) => x - y)
+      const key = s[0] + ',' + s[1] + ',' + s[2]
+      if (seenTri.has(key)) continue
+      seenTri.add(key)
+      rebuilt.push(a, b, c)
+    }
+    if (rebuilt.length / 3 < 4) return null
+    tri = new Uint32Array(rebuilt)
+    F = tri.length / 3
+  }
+
+  // 4. fan-fill the boundary loops the collapses left behind (tiny holes).
+  // Each boundary vertex must have exactly one outgoing and one incoming
+  // boundary edge, otherwise the loop is pinched — not repairable.
+  {
+    const uses = buildUses(tri, F)
+    const nextOut = new Map()
+    let boundaryCount = 0
+    for (const [k, list] of uses) {
+      if (list.length === 2) continue
+      if (list.length > 2) return null
+      boundaryCount++
+      const lo = Math.floor(k / V)
+      const hi = k % V
+      // the single face traverses either lo->hi or hi->lo; record its direction
+      if (list[0].fwd) {
+        if (nextOut.has(lo)) return null
+        nextOut.set(lo, hi)
+      } else {
+        if (nextOut.has(hi)) return null
+        nextOut.set(hi, lo)
+      }
+    }
+    if (boundaryCount > 0) {
+      const visitedEdge = new Set()
+      const fills = []
+      // every existing edge (for chord-collision checks during ear clipping)
+      const edgeSet = new Set()
+      for (const [k] of uses) edgeSet.add(k)
+      const ek = (a, b) => (a < b ? a * V + b : b * V + a)
+      for (const [start] of nextOut) {
+        // skip vertices already consumed by a previously walked loop
+        const firstNxt = nextOut.get(start)
+        if (visitedEdge.has(ek(start, firstNxt))) continue
+        const loop = [start]
+        let cur = start
+        let guard = 0
+        while (guard++ < 64) {
+          const nxt = nextOut.get(cur)
+          if (nxt === undefined) return null
+          const e = ek(cur, nxt)
+          if (visitedEdge.has(e)) break
+          visitedEdge.add(e)
+          cur = nxt
+          if (cur === start) break
+          loop.push(cur)
+        }
+        if (cur !== start || loop.length < 3 || loop.length > 24) return null
+        // ear-clip the hole, opposite to the surface's boundary direction;
+        // an ear is only valid when its chord is not an existing edge
+        const vs = [...loop]
+        let guard2 = 0
+        while (vs.length > 3 && guard2++ < 64) {
+          let clipped = false
+          for (let i = 0; i < vs.length; i++) {
+            const a = vs[(i + vs.length - 1) % vs.length]
+            const b = vs[i]
+            const c = vs[(i + 1) % vs.length]
+            const chord = ek(a, c)
+            if (edgeSet.has(chord)) continue
+            fills.push(a, c, b)
+            edgeSet.add(chord)
+            vs.splice(i, 1)
+            clipped = true
+            break
+          }
+          if (!clipped) return null
+        }
+        fills.push(vs[0], vs[2], vs[1])
+      }
+      const merged = new Uint32Array(F * 3 + fills.length)
+      merged.set(tri)
+      merged.set(new Uint32Array(fills), F * 3)
+      tri = merged
+      F = tri.length / 3
+    }
+  }
+
+  // 5. final check: every edge used by exactly two faces (closed 2-manifold)
+  const BIG = F + 1
+  const edges = new Map()
+  for (let t = 0; t < F; t++) {
+    for (let e = 0; e < 3; e++) {
+      const a = tri[t * 3 + e]
+      const b = tri[t * 3 + ((e + 1) % 3)]
+      const k = a < b ? a * V + b : b * V + a
+      const v = edges.get(k)
+      if (v === undefined) {
+        edges.set(k, t * BIG)
+      } else {
+        if (v % BIG !== 0) return null
+        edges.set(k, v + t + 1)
+      }
+    }
+  }
+
+  // 6. BFS orientation propagation
+  const neighbor = (t, e) => {
+    const a = tri[t * 3 + e]
+    const b = tri[t * 3 + ((e + 1) % 3)]
+    const v = edges.get(a < b ? a * V + b : b * V + a)
+    const t1 = Math.floor(v / BIG)
+    const t2 = v % BIG - 1
+    return t2 < 0 ? -1 : t1 === t ? t2 : t1
+  }
+  const flip = new Uint8Array(F)
+  const dirOf = (t, a, b) => {
+    for (let e = 0; e < 3; e++) {
+      const p = tri[t * 3 + e]
+      const q = tri[t * 3 + ((e + 1) % 3)]
+      if (p === a && q === b) return flip[t] ? 0 : 1
+      if (p === b && q === a) return flip[t] ? 1 : 0
+    }
+    return -1
+  }
+  const visited = new Uint8Array(F)
+  const comp = new Int32Array(F).fill(-1)
+  let nComp = 0
+  const stack = []
+  for (let seed = 0; seed < F; seed++) {
+    if (visited[seed]) continue
+    visited[seed] = 1
+    comp[seed] = nComp
+    stack.push(seed)
+    while (stack.length) {
+      const t = stack.pop()
+      for (let e = 0; e < 3; e++) {
+        const a = tri[t * 3 + e]
+        const b = tri[t * 3 + ((e + 1) % 3)]
+        const nb = neighbor(t, e)
+        if (nb < 0 || nb === t) continue
+        const dT = flip[t] ? 0 : 1
+        const dN = dirOf(nb, a, b)
+        if (dN < 0) return null
+        if (visited[nb]) {
+          if (dN === dT) return null
+        } else {
+          visited[nb] = 1
+          comp[nb] = comp[t]
+          if (dN === dT) flip[nb] = 1
+          stack.push(nb)
+        }
+      }
+    }
+    nComp++
+  }
+
+  // 7. per-component signed volume: drop sliver debris left over from the
+  //    collapses (both directions), keep real bodies and real cavities
+  const compVol6 = new Float64Array(nComp)
+  for (let t = 0; t < F; t++) {
+    let i0 = tri[t * 3]
+    let i1 = tri[t * 3 + 1]
+    let i2 = tri[t * 3 + 2]
+    if (flip[t]) {
+      const tmp = i1
+      i1 = i2
+      i2 = tmp
+    }
+    compVol6[comp[t]] +=
+      px(i0) * (py(i1) * pz(i2) - pz(i1) * py(i2)) -
+      py(i0) * (px(i1) * pz(i2) - pz(i1) * px(i2)) +
+      pz(i0) * (px(i1) * py(i2) - py(i1) * px(i2))
+  }
+  let mainVol6 = 0
+  for (let c = 0; c < nComp; c++) mainVol6 = Math.max(mainVol6, Math.abs(compVol6[c]))
+  const keepComp = new Uint8Array(nComp)
+  for (let c = 0; c < nComp; c++) {
+    keepComp[c] = Math.abs(compVol6[c]) > mainVol6 * 1e-4 ? 1 : 0
+  }
+  if (!keepComp.some((k) => k)) return null
+  // global sense from the surviving volume (outward normals)
+  let vol6 = 0
+  for (let c = 0; c < nComp; c++) if (keepComp[c]) vol6 += compVol6[c]
+  const flipAll = vol6 < 0
+  const outTri = new Uint32Array(F * 3)
+  let w = 0
+  for (let t = 0; t < F; t++) {
+    if (!keepComp[comp[t]]) continue
+    const s = t * 3
+    if ((flip[t] === 1) !== flipAll) {
+      outTri[w] = tri[s]
+      outTri[w + 1] = tri[s + 2]
+      outTri[w + 2] = tri[s + 1]
+    } else {
+      outTri[w] = tri[s]
+      outTri[w + 1] = tri[s + 1]
+      outTri[w + 2] = tri[s + 2]
+    }
+    w += 3
+  }
+  const finalTri = outTri.subarray(0, w)
+  const finalMap = new Int32Array(V).fill(-1)
+  const finalProps = []
+  let fnext = 0
+  for (let i = 0; i < finalTri.length; i++) {
+    const v = finalTri[i]
+    if (finalMap[v] < 0) {
+      finalMap[v] = fnext++
+      for (let pr = 0; pr < numProp; pr++) finalProps.push(outProps[v * numProp + pr])
+    }
+    finalTri[i] = finalMap[v]
+  }
+  return { vertProperties: new Float32Array(finalProps), triVerts: new Uint32Array(finalTri) }
+}
 function geometryToManifold(wasm, geometry) {
   const { Manifold, Mesh } = wasm
   const pos = geometry.attributes.position
@@ -50,7 +473,32 @@ function geometryToManifold(wasm, geometry) {
   }
   const mesh = new Mesh({ numProp, vertProperties, triVerts })
   mesh.merge()
-  return new Manifold(mesh)
+  let solid = new Manifold(mesh)
+  // Flipped patches in the source file survive the weld (genus < 0 flags
+  // inconsistent winding) and would leak into every cut piece — repair once.
+  if (solid.genus() < 0) {
+    const repaired = repairMesh(mesh)
+    let fixed = null
+    if (repaired) {
+      const m2 = new Mesh({ numProp, vertProperties: repaired.vertProperties, triVerts: repaired.triVerts })
+      m2.merge()
+      try {
+        const candidate = new Manifold(m2)
+        if (candidate.status() === 'NoError' && candidate.genus() > solid.genus()) {
+          fixed = candidate
+        } else {
+          candidate.delete()
+        }
+      } catch {
+        /* keep the original solid */
+      }
+    }
+    if (fixed) {
+      solid.delete()
+      solid = fixed
+    }
+  }
+  return solid
 }
 
 function manifoldToGeometry(manifold) {
