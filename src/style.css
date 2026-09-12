@@ -77,6 +77,9 @@ button.lang:hover { color: var(--text); background: var(--field); }
 .main { flex: 1; position: relative; min-height: 0; }
 .canvas-wrap { position: absolute; inset: 0; }
 .canvas-wrap canvas { width: 100%; height: 100%; display: block; }
+/* fills the main area and anchors the toolbar/HUD overlays */
+.viewport { position: absolute; inset: 0; }
+.viewport canvas { display: block; }
 .face-mode canvas { cursor: crosshair; }
 
 /* OrcaSlicer-style vertical tool column on the viewport's left edge:
