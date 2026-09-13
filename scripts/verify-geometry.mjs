@@ -115,6 +115,38 @@ console.log('\n=== 2. Plane cut with pins (peg+socket) ===')
   check('socket piece loses volume', volume(parts[0]) < volume(plain[0]) - 1)
 }
 
+console.log('\n=== 2b. Plane cut connector types, rotation and side ===')
+{
+  const g = new THREE.BoxGeometry(60, 60, 40).toNonIndexed()
+  const plane = { pos: [0, 0, 0], quat: [0, 0, 0, 1] }
+  for (const type of ['pin', 'square', 'hex', 'dovetail']) {
+    const parts = await planeCut(g, plane, {
+      kerf: 0.15,
+      pins: true,
+      pinDiameter: 6,
+      pinLength: 8,
+      tolerance: 0.2,
+      spacing: 25,
+      connectorType: type,
+      connectorRot: type === 'square' ? 45 : 0
+    })
+    check(
+      `plane ${type} connectors cut cleanly`,
+      parts.length === 2 && parts.every(watertight),
+      `${parts.length} pieces`
+    )
+  }
+  const sideA = await planeCut(g, plane, { kerf: 0.15, pins: true, pinDiameter: 6, pinLength: 8, spacing: 25, pinSide: 'a' })
+  const sideB = await planeCut(g, plane, { kerf: 0.15, pins: true, pinDiameter: 6, pinLength: 8, spacing: 25, pinSide: 'b' })
+  const va = sideA.map(volume)
+  const vb = sideB.map(volume)
+  check(
+    'plane peg side flip swaps piece volumes',
+    Math.abs(va[0] - vb[1]) < 1 && Math.abs(va[1] - vb[0]) < 1,
+    `[${va.map((x) => x.toFixed(0))}] vs [${vb.map((x) => x.toFixed(0))}]`
+  )
+}
+
 console.log('\n=== 3. Kerf removes material ===')
 {
   const g = boxGeometry(100, 60, 40)
@@ -318,6 +350,72 @@ console.log('\n=== 12. Freehand curved cut (knife-project style) ===')
     check('ratome curved cut into 2 pieces',
       rparts.length === 2 && rparts.every(watertight),
       `${rparts.length} pieces in ${((Date.now() - t0) / 1000).toFixed(1)}s`)
+  }
+
+  // Curved cut WITH connectors: pegs and sockets bridging the pieces along
+  // the drawn curve; volumes must shift between the two sides.
+  {
+    const R2 = 40
+    const g2 = new THREE.SphereGeometry(R2, 64, 48).toNonIndexed()
+    const p2 = []
+    for (let i = 0; i <= 12; i++) {
+      const x = -R2 * 0.7 + (1.4 * R2 * i) / 12
+      const y = Math.sin((i / 12) * Math.PI * 2) * R2 * 0.25
+      const z = Math.sqrt(Math.max(1e-6, R2 * R2 - x * x - y * y))
+      p2.push(new THREE.Vector3(x, y, z))
+    }
+    const plain = await curvedCut(g2, p2, [0, 0, -1], { kerf: 0.15, pins: false })
+    const pinned = await curvedCut(g2, p2, [0, 0, -1], {
+      kerf: 0.15,
+      pins: true,
+      pinDiameter: 6,
+      pinLength: 8,
+      tolerance: 0.15,
+      spacing: 25,
+      taper: true,
+      connectorType: 'pin'
+    })
+    check('pinned curved cut returns 2 pieces', pinned.length === 2, `${pinned.length} pieces`)
+    check('pinned curved pieces watertight', pinned.every(watertight))
+    const vp = plain.map(volume).sort((a, b) => a - b)
+    const vq = pinned.map(volume).sort((a, b) => a - b)
+    check(
+      'curved peg/socket shift volumes per piece',
+      vq[0] < vp[0] - 5 && vq[1] > vp[1] + 5,
+      `[${vq.map((x) => x.toFixed(0))}] vs [${vp.map((x) => x.toFixed(0))}]`
+    )
+    // Every connector type must cut cleanly.
+    for (const type of ['square', 'hex', 'dovetail', 'dowel']) {
+      const tp = await curvedCut(g2, p2, [0, 0, -1], {
+        kerf: 0.15,
+        pins: true,
+        pinDiameter: 6,
+        pinLength: 8,
+        tolerance: 0.15,
+        spacing: 30,
+        connectorType: type,
+        connectorRot: type === 'square' || type === 'dovetail' ? 30 : 0
+      })
+      check(
+        `curved ${type} connectors cut cleanly`,
+        tp.length === 2 && tp.every(watertight),
+        `${tp.length} pieces`
+      )
+    }
+    // Peg side flip: swapping sides must swap which piece carries the pegs.
+    const sideA = await curvedCut(g2, p2, [0, 0, -1], {
+      kerf: 0.15, pins: true, pinDiameter: 6, pinLength: 8, spacing: 25, pinSide: 'a'
+    })
+    const sideB = await curvedCut(g2, p2, [0, 0, -1], {
+      kerf: 0.15, pins: true, pinDiameter: 6, pinLength: 8, spacing: 25, pinSide: 'b'
+    })
+    const va = sideA.map(volume)
+    const vb = sideB.map(volume)
+    check(
+      'peg side flip swaps piece volumes',
+      Math.abs(va[0] - vb[1]) < 1 && Math.abs(va[1] - vb[0]) < 1,
+      `[${va.map((x) => x.toFixed(0))}] vs [${vb.map((x) => x.toFixed(0))}]`
+    )
   }
 
   // Diagonal freehand line across a box front, viewed from +Z.

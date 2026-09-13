@@ -61,9 +61,13 @@ export const simplifyAsync = (geometry, ratio) => runOp('simplify', geometry, { 
 
 export const volumeCutAsync = (geometry, matrix) => runOp('volumeCut', geometry, { params: { matrix } })
 
-export const curvedCutAsync = (geometry, points, viewDir, kerf) =>
+export const curvedCutAsync = (geometry, points, viewDir, params) =>
   runOp('curvedCut', geometry, {
-    params: { points: points.map((p) => [p.x, p.y, p.z]), viewDir: [viewDir.x, viewDir.y, viewDir.z], kerf }
+    params: {
+      ...params,
+      points: points.map((p) => [p.x, p.y, p.z]),
+      viewDir: [viewDir.x, viewDir.y, viewDir.z]
+    }
   })
 
 // Plain-data op: connector preview poses (no geometry comes back).

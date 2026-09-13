@@ -38,6 +38,15 @@ export const IconCurve = () => (
   </svg>
 )
 
+export const IconDraft = () => (
+  <svg {...base}>
+    <path d="M9 4h6v2H9z" />
+    <path d="M15 4h3.5a1.5 1.5 0 0 1 1.5 1.5v13A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5v-13A1.5 1.5 0 0 1 5.5 4H9" />
+    <line x1="8" y1="10" x2="16" y2="10" />
+    <line x1="8" y1="14" x2="13" y2="14" />
+  </svg>
+)
+
 export const IconMove = () => (
   <svg {...base}>
     <line x1="12" y1="3.5" x2="12" y2="20.5" />

@@ -23,7 +23,8 @@ import {
   IconFlip,
   IconGrip,
   IconMinimize,
-  IconMaximize
+  IconMaximize,
+  IconDraft
 } from './icons.jsx'
 import { CutPositionRuler } from './components/CutPositionRuler.jsx'
 import { growRegion, regionPositions, regionOrientedBox } from './geometry/shapeSelect.js'
@@ -337,6 +338,60 @@ export function App() {
     }
   }
 
+  // Apply every enabled draft cut, in order, to the pristine source pieces.
+  async function onDraftBuild() {
+    const st = useStore.getState()
+    const cuts = st.draftCuts.filter((c) => c.enabled)
+    if (!cuts.length || !st.draftSource?.length) return
+    s.setBusy(true)
+    s.setError(null)
+    setBusyMsg(t('draftBuilding'))
+    try {
+      let pieces = st.draftSource.map((p) => ({ ...p }))
+      for (const cut of cuts) {
+        const targets = pieces.filter((p) => p.visible && !isDowelPiece(p))
+        for (const piece of targets) {
+          const parts =
+            cut.kind === 'curved'
+              ? await curvedCutAsync(piece.geometry, cut.points, cut.viewDir, cut.params)
+              : await planeCutAsync(piece.geometry, cut.plane, cut.params)
+          if (parts.length < 2) continue
+          const idx = pieces.findIndex((p) => p.id === piece.id)
+          pieces.splice(
+            idx,
+            1,
+            ...parts.map((g, i) => ({
+              id: newPieceId(),
+              name: `${piece.name.replace(/\.[^.]+$/, '')}_${i + 1}`,
+              geometry: g,
+              visible: true
+            }))
+          )
+        }
+      }
+      useStore.getState().setDraftApplied(pieces)
+    } catch (e) {
+      console.error(e)
+      s.setError(t('cutError'))
+    } finally {
+      setBusyMsg(null)
+      s.setBusy(false)
+    }
+  }
+
+  // Live plan preview + ghosted model while drafting.
+  useEffect(() => {
+    const v = viewerRef.current
+    if (!v) return
+    if (s.draftMode) {
+      v.setDraftPreview(s.draftCuts)
+      v.setPiecesGhost(true)
+    } else {
+      v.clearDraftPreview()
+      v.setPiecesGhost(false)
+    }
+  }, [s.draftMode, s.draftCuts, s.pieces])
+
   // Model bounding box and active axis dimensions
   const modelBox = useMemo(() => {
     if (!s.pieces.length) return null
@@ -383,6 +438,18 @@ export function App() {
 
   async function onCurveCut() {
     if (curveRef.current.length < 2 || !curveDirRef.current) return
+    if (s.draftMode) {
+      s.addDraftCut({
+        kind: 'curved',
+        points: curveRef.current.map((cp) => cp.point.clone()),
+        viewDir: curveDirRef.current.clone(),
+        params: { ...s.cutParams }
+      })
+      curveRef.current = []
+      curveDirRef.current = null
+      setCurvePoints([])
+      return
+    }
     s.setBusy(true)
     s.setError(null)
     setBusyMsg(t('cutting'))
@@ -395,7 +462,7 @@ export function App() {
           piece.geometry,
           curveRef.current.map((cp) => cp.point),
           dir,
-          s.cutParams.kerf
+          s.cutParams
         )
         if (parts.length < 2) continue
         split++
@@ -873,6 +940,15 @@ export function App() {
   }
 
   async function onCut() {
+    // Draft mode: plan the cut instead of executing it.
+    if (s.draftMode) {
+      s.addDraftCut({
+        kind: 'plane',
+        plane: { pos: [...s.plane.pos], quat: [...s.plane.quat] },
+        params: { ...s.cutParams, manualPins: manualPins.length ? manualPins.map((m) => [...m]) : undefined }
+      })
+      return
+    }
     s.setBusy(true)
     s.setError(null)
     try {
@@ -1182,8 +1258,17 @@ export function App() {
         )}
         <div className="spacer" />
         <button
+          className={`icon-btn draft-toggle${s.draftMode ? ' active' : ''}`}
+          disabled={!s.pieces.length}
+          onClick={() => s.setDraftMode(!s.draftMode)}
+          aria-label={t('draftMode')}
+          title={t('draftMode')}
+        >
+          <IconDraft /> {t('draftMode')}
+        </button>
+        <button
           className="icon-btn"
-          disabled={!s.history.length}
+          disabled={!s.history.length || s.draftMode}
           onClick={() => s.undo()}
           aria-label={t('undo')}
         >
@@ -1191,7 +1276,7 @@ export function App() {
         </button>
         <button
           className="icon-btn"
-          disabled={!s.future.length}
+          disabled={!s.future.length || s.draftMode}
           onClick={() => s.redo()}
           aria-label={t('redo')}
         >
@@ -1361,7 +1446,7 @@ export function App() {
                             boxShadow: `0 0 14px ${currentAxisInfo.glow}`
                           }}
                         >
-                          <IconCut /> {s.busy ? t('cutExecuting') : t('cutExecute')}
+                          <IconCut /> {s.busy ? t('cutExecuting') : s.draftMode ? t('draftAddCut') : t('cutExecute')}
                         </button>
                       </div>
                     </div>
@@ -1528,7 +1613,7 @@ export function App() {
                             color: '#0e1014'
                           }}
                         >
-                          <IconCut /> {s.busy ? t('cutExecuting') : t('cutExecute')}
+                          <IconCut /> {s.busy ? t('cutExecuting') : s.draftMode ? t('draftAddCut') : t('cutExecute')}
                         </button>
                       </div>
                     </div>
@@ -1826,7 +1911,8 @@ export function App() {
                             ['dowel', t('connDowel')],
                             ['pin', t('connPin')],
                             ['square', t('connSquare')],
-                            ['hex', t('connHex')]
+                            ['hex', t('connHex')],
+                            ['dovetail', t('connDovetail')]
                           ].map(([type, label]) => (
                             <button
                               key={type}
@@ -1838,6 +1924,27 @@ export function App() {
                           ))}
                         </div>
                       </label>
+                      {['square', 'hex', 'dovetail'].includes(s.cutParams.connectorType) && (
+                        <label>
+                          {t('connectorRot')}
+                          <input
+                            type="number"
+                            step="15"
+                            value={s.cutParams.connectorRot}
+                            onChange={(e) => s.setCutParams({ connectorRot: +e.target.value })}
+                          />
+                        </label>
+                      )}
+                      {s.cutParams.connectorType !== 'dowel' && (
+                        <button
+                          onClick={() =>
+                            s.setCutParams({ pinSide: s.cutParams.pinSide === 'b' ? 'a' : 'b' })
+                          }
+                        >
+                          {t('pegSide')}:{' '}
+                          {s.cutParams.pinSide === 'b' ? t('pegSide2') : t('pegSide1')}
+                        </button>
+                      )}
                     </>
                   )}
                 </section>
@@ -1848,6 +1955,46 @@ export function App() {
               <section>
                 <h3>{t('modeMove')}</h3>
                 <div className="dims">{selectedId ? t('moveHint') : t('selectHint')}</div>
+              </section>
+            )}
+
+            {s.draftMode && (
+              <section className="draft-panel">
+                <h3>
+                  {t('draftMode')}
+                  <button className="link" onClick={() => s.setDraftMode(false)}>
+                    {t('draftExit')}
+                  </button>
+                </h3>
+                <div className="dims">{t('draftHint')}</div>
+                {s.draftCuts.length === 0 && <div className="dims">{t('draftEmpty')}</div>}
+                {s.draftCuts.map((cut, i) => (
+                  <div key={cut.id} className="simplify-row draft-entry">
+                    <label className="inline" style={{ flex: 1, minWidth: 0 }}>
+                      <input
+                        type="checkbox"
+                        checked={cut.enabled}
+                        onChange={() => s.toggleDraftCut(cut.id)}
+                      />
+                      <span className="dims" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {i + 1}.{' '}
+                        {cut.kind === 'plane'
+                          ? t('draftEntryPlane', { axis: (AXIS_INFO.find((a) => a.quat.join() === cut.plane.quat.join())?.label ?? '·') })
+                          : t('draftEntryCurved', { n: cut.points.length })}
+                      </span>
+                    </label>
+                    <button className="link" onClick={() => s.removeDraftCut(cut.id)}>
+                      ✕
+                    </button>
+                  </div>
+                ))}
+                <button
+                  className="primary"
+                  disabled={s.busy || !s.draftCuts.some((c) => c.enabled)}
+                  onClick={onDraftBuild}
+                >
+                  {s.busy ? busyMsg || t('cutting') : t('draftBuild')}
+                </button>
               </section>
             )}
 
@@ -1896,17 +2043,121 @@ export function App() {
                     onChange={(e) => s.setCutParams({ kerf: +e.target.value })}
                   />
                 </label>
+                <h3>
+                  {t('pinsToggle')}
+                  <label className="inline">
+                    <input
+                      type="checkbox"
+                      checked={s.cutParams.pins}
+                      onChange={(e) => s.setCutParams({ pins: e.target.checked })}
+                    />
+                  </label>
+                </h3>
+                {s.cutParams.pins && (
+                  <>
+                    <label>
+                      {t(
+                        ['square', 'hex'].includes(s.cutParams.connectorType)
+                          ? 'pinWidth'
+                          : 'pinDiameter'
+                      )}
+                      <input
+                        type="number"
+                        min="1"
+                        step="0.5"
+                        value={s.cutParams.pinDiameter}
+                        onChange={(e) => s.setCutParams({ pinDiameter: +e.target.value })}
+                      />
+                    </label>
+                    <label>
+                      {t('pinLength')}
+                      <input
+                        type="number"
+                        min="2"
+                        step="0.5"
+                        value={s.cutParams.pinLength}
+                        onChange={(e) => s.setCutParams({ pinLength: +e.target.value })}
+                      />
+                    </label>
+                    <label>
+                      {t('tolerance')}
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.05"
+                        value={s.cutParams.tolerance}
+                        onChange={(e) => s.setCutParams({ tolerance: +e.target.value })}
+                      />
+                    </label>
+                    <label>
+                      {t('spacing')}
+                      <input
+                        type="number"
+                        min="5"
+                        step="5"
+                        value={s.cutParams.spacing}
+                        onChange={(e) => s.setCutParams({ spacing: +e.target.value })}
+                      />
+                    </label>
+                    <label className="inline">
+                      <input
+                        type="checkbox"
+                        checked={s.cutParams.taper}
+                        onChange={(e) => s.setCutParams({ taper: e.target.checked })}
+                      />
+                      {t('taper')}
+                    </label>
+                    <label>
+                      {t('connector')}
+                      <div className="axis-row">
+                        {[
+                          ['pin', t('connPin')],
+                          ['square', t('connSquare')],
+                          ['hex', t('connHex')],
+                          ['dovetail', t('connDovetail')]
+                        ].map(([type, label]) => (
+                          <button
+                            key={type}
+                            className={s.cutParams.connectorType === type ? 'active' : ''}
+                            onClick={() => s.setConnectorType(type)}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </label>
+                    {['square', 'hex', 'dovetail'].includes(s.cutParams.connectorType) && (
+                      <label>
+                        {t('connectorRot')}
+                        <input
+                          type="number"
+                          step="15"
+                          value={s.cutParams.connectorRot}
+                          onChange={(e) => s.setCutParams({ connectorRot: +e.target.value })}
+                        />
+                      </label>
+                    )}
+                    <button
+                      onClick={() =>
+                        s.setCutParams({ pinSide: s.cutParams.pinSide === 'b' ? 'a' : 'b' })
+                      }
+                    >
+                      {t('pegSide')}:{' '}
+                      {s.cutParams.pinSide === 'b' ? t('pegSide2') : t('pegSide1')}
+                    </button>
+                  </>
+                )}
                 <button
                   className="primary"
                   disabled={s.busy || curvePoints.length < 2}
                   onClick={onCurveCut}
                 >
-                  {s.busy ? t('cutting') : t('curvedExecute')}
+                  {s.busy ? t('cutting') : s.draftMode ? t('draftAddCut') : t('curvedExecute')}
                 </button>
               </section>
             )}
 
-            {activeTool === 'volume' && (
+            {!s.draftMode && activeTool === 'volume' && (
               <section>
                 <h3>{t('volumeCut')}</h3>
                 <div className="dims">{t('volumeHint')}</div>
@@ -1945,7 +2196,7 @@ export function App() {
               </section>
             )}
 
-            {activeTool === 'shape' && (
+            {!s.draftMode && activeTool === 'shape' && (
               <section>
                 <h3>{t('shapeCut')}</h3>
                 <div className="dims">
@@ -1981,7 +2232,7 @@ export function App() {
               </section>
             )}
 
-            {activeTool === 'puzzle' && (
+            {!s.draftMode && activeTool === 'puzzle' && (
               <section>
                 <h3>{t('puzzle')}</h3>
                 <label>

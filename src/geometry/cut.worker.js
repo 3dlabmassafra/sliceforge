@@ -31,7 +31,7 @@ self.onmessage = async (e) => {
         g,
         params.points.map((p) => new THREE.Vector3(...p)),
         params.viewDir,
-        { kerf: params.kerf }
+        params
       )
     else if (op === 'pinPreview') {
       const pins = await previewPins(g, params.planes, params)

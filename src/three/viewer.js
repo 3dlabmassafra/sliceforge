@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
-import { AXIS_QUATS, viewBasis } from '../geometry/plane.js'
+import { AXIS_QUATS, viewBasis, planeBasis } from '../geometry/plane.js'
 import { computeSectionSegments } from '../geometry/sectionContour.js'
 import { coplanarRegion, growRegion, regionPositions } from '../geometry/shapeSelect.js'
 
@@ -923,11 +923,7 @@ export class Viewer {
       this._curveGroup = new THREE.Group()
       this.scene.add(this._curveGroup)
     }
-    // Scale markers to the model so they stay visible at any zoom.
-    const box = new THREE.Box3()
-    for (const m of this.piecesGroup.children) {
-      if (m.visible) box.expandByObject(m)
-    }
+    const box = this._piecesBox()
     const size = box.isEmpty() ? 50 : box.getSize(new THREE.Vector3()).length()
     const markerR = size * 0.008
 
@@ -944,94 +940,167 @@ export class Viewer {
       const lineGeo = new THREE.BufferGeometry().setFromPoints(pts3)
       const lineMat = new THREE.LineBasicMaterial({ color: 0xff5c7a, linewidth: 2 })
       this._curveGroup.add(new THREE.Line(lineGeo, lineMat))
-
-      // The wall: 2D projection of the curve on the view plane, ends
-      // extended, thickened by the kerf, extruded across the model depth.
-      const { u, v, n } = viewBasis(new THREE.Vector3(viewDir.x, viewDir.y, viewDir.z))
-      const origin = pts3[0].clone()
-      const toLocal = (p) => {
-        const d = p.clone().sub(origin)
-        return [d.dot(u), d.dot(v), d.dot(n)]
-      }
-      const pts2 = pts3.map((p) => {
-        const l = toLocal(p)
-        return [l[0], l[1]]
-      })
-      const radius = size / 2
-      const w2 = Math.max(kerf ?? 0.15, 0.02) / 2
-      const ext = radius * 1.5 + 10
-      const ext2 = (a, b, sign) => {
-        const dx = b[0] - a[0]
-        const dy = b[1] - a[1]
-        const len = Math.hypot(dx, dy)
-        if (len < 1e-9) return null
-        return [a[0] + (dx / len) * ext * sign, a[1] + (dy / len) * ext * sign]
-      }
-      const start = ext2(pts2[0], pts2[1], -1)
-      if (start) pts2.unshift(start)
-      const end = ext2(pts2[pts2.length - 1], pts2[pts2.length - 2], 1)
-      if (end) pts2.push(end)
-
-      // Depth range of the model along the view axis.
-      let tMin = Infinity
-      let tMax = -Infinity
-      const corner = new THREE.Vector3()
-      if (!box.isEmpty()) {
-        for (let xi = 0; xi < 2; xi++)
-          for (let yi = 0; yi < 2; yi++)
-            for (let zi = 0; zi < 2; zi++) {
-              corner.set(xi ? box.max.x : box.min.x, yi ? box.max.y : box.min.y, zi ? box.max.z : box.min.z)
-              const t = corner.clone().sub(origin).dot(n)
-              tMin = Math.min(tMin, t)
-              tMax = Math.max(tMax, t)
-            }
-      } else {
-        tMin = -radius
-        tMax = radius
-      }
-      const pad = (tMax - tMin) * 0.1 + 1
-      tMin -= pad
-      tMax += pad
-
-      const wallMat = new THREE.MeshBasicMaterial({
-        color: 0x38d6e0,
-        transparent: true,
-        opacity: 0.16,
-        side: THREE.DoubleSide,
-        depthWrite: false
-      })
-      const wallPos = []
-      const P = (x, y, t) =>
-        origin.clone().addScaledVector(u, x).addScaledVector(v, y).addScaledVector(n, t)
-      for (let i = 0; i + 1 < pts2.length; i++) {
-        const [ax, ay] = pts2[i]
-        const [bx, by] = pts2[i + 1]
-        const dx = bx - ax
-        const dy = by - ay
-        const len = Math.hypot(dx, dy)
-        if (len < 1e-9) continue
-        const nx = -dy / len
-        const ny = dx / len
-        const a1 = P(ax + nx * w2, ay + ny * w2, tMin)
-        const b1 = P(bx + nx * w2, by + ny * w2, tMin)
-        const c1 = P(bx - nx * w2, by - ny * w2, tMin)
-        const d1 = P(ax - nx * w2, ay - ny * w2, tMin)
-        const a2 = a1.clone().addScaledVector(n, tMax - tMin)
-        const b2 = b1.clone().addScaledVector(n, tMax - tMin)
-        const c2 = c1.clone().addScaledVector(n, tMax - tMin)
-        const d2 = d1.clone().addScaledVector(n, tMax - tMin)
-        for (const tri of [
-          [a1, b1, b2], [a1, b2, a2], // top edge
-          [c1, d1, d2], [c1, d2, c2], // bottom edge
-          [a2, b2, c2], [a2, c2, d2]  // far cap
-        ]) {
-          for (const p of tri) wallPos.push(p.x, p.y, p.z)
-        }
-      }
-      const wallGeo = new THREE.BufferGeometry()
-      wallGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(wallPos), 3))
-      this._curveGroup.add(new THREE.Mesh(wallGeo, wallMat))
+      this._curveGroup.add(this._buildCurveWall(pts3, viewDir, kerf, box))
     }
+  }
+
+  // Translucent cutting-wall mesh for a drawn curve (shared by the live
+  // curve tool and the draft-mode previews).
+  _buildCurveWall(pts3, viewDir, kerf, box) {
+    const { u, v, n } = viewBasis(new THREE.Vector3(viewDir.x, viewDir.y, viewDir.z))
+    const origin = pts3[0].clone()
+    const pts2 = pts3.map((p) => {
+      const d = p.clone().sub(origin)
+      return [d.dot(u), d.dot(v)]
+    })
+    const size = box.isEmpty() ? 50 : box.getSize(new THREE.Vector3()).length()
+    const radius = size / 2
+    const w2 = Math.max(kerf ?? 0.15, 0.02) / 2
+    const ext = radius * 1.5 + 10
+    const ext2 = (a, b, sign) => {
+      const dx = b[0] - a[0]
+      const dy = b[1] - a[1]
+      const len = Math.hypot(dx, dy)
+      if (len < 1e-9) return null
+      return [a[0] + (dx / len) * ext * sign, a[1] + (dy / len) * ext * sign]
+    }
+    const start = ext2(pts2[0], pts2[1], -1)
+    if (start) pts2.unshift(start)
+    const end = ext2(pts2[pts2.length - 1], pts2[pts2.length - 2], 1)
+    if (end) pts2.push(end)
+
+    let tMin = Infinity
+    let tMax = -Infinity
+    const corner = new THREE.Vector3()
+    if (!box.isEmpty()) {
+      for (let xi = 0; xi < 2; xi++)
+        for (let yi = 0; yi < 2; yi++)
+          for (let zi = 0; zi < 2; zi++) {
+            corner.set(xi ? box.max.x : box.min.x, yi ? box.max.y : box.min.y, zi ? box.max.z : box.min.z)
+            const t = corner.clone().sub(origin).dot(n)
+            tMin = Math.min(tMin, t)
+            tMax = Math.max(tMax, t)
+          }
+    } else {
+      tMin = -radius
+      tMax = radius
+    }
+    const pad = (tMax - tMin) * 0.1 + 1
+    tMin -= pad
+    tMax += pad
+
+    const wallPos = []
+    const P = (x, y, t) =>
+      origin.clone().addScaledVector(u, x).addScaledVector(v, y).addScaledVector(n, t)
+    for (let i = 0; i + 1 < pts2.length; i++) {
+      const [ax, ay] = pts2[i]
+      const [bx, by] = pts2[i + 1]
+      const dx = bx - ax
+      const dy = by - ay
+      const len = Math.hypot(dx, dy)
+      if (len < 1e-9) continue
+      const nx = -dy / len
+      const ny = dx / len
+      const a1 = P(ax + nx * w2, ay + ny * w2, tMin)
+      const b1 = P(bx + nx * w2, by + ny * w2, tMin)
+      const c1 = P(bx - nx * w2, by - ny * w2, tMin)
+      const d1 = P(ax - nx * w2, ay - ny * w2, tMin)
+      const a2 = a1.clone().addScaledVector(n, tMax - tMin)
+      const b2 = b1.clone().addScaledVector(n, tMax - tMin)
+      const c2 = c1.clone().addScaledVector(n, tMax - tMin)
+      const d2 = d1.clone().addScaledVector(n, tMax - tMin)
+      for (const tri of [
+        [a1, b1, b2], [a1, b2, a2],
+        [c1, d1, d2], [c1, d2, c2],
+        [a2, b2, c2], [a2, c2, d2]
+      ]) {
+        for (const p of tri) wallPos.push(p.x, p.y, p.z)
+      }
+    }
+    const wallGeo = new THREE.BufferGeometry()
+    wallGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(wallPos), 3))
+    const wallMat = new THREE.MeshBasicMaterial({
+      color: 0x38d6e0,
+      transparent: true,
+      opacity: 0.16,
+      side: THREE.DoubleSide,
+      depthWrite: false
+    })
+    return new THREE.Mesh(wallGeo, wallMat)
+  }
+
+  _piecesBox() {
+    const box = new THREE.Box3()
+    for (const m of this.piecesGroup.children) {
+      if (m.visible) box.expandByObject(m)
+    }
+    return box
+  }
+
+  /**
+   * Draft-mode plan preview: every planned cut at once — plane quads (with
+   * their pose) and curved walls, dimmed for disabled entries.
+   */
+  setDraftPreview(entries) {
+    this.clearDraftPreview()
+    if (!entries?.length) return
+    if (!this._draftGroup) {
+      this._draftGroup = new THREE.Group()
+      this.scene.add(this._draftGroup)
+    }
+    const box = this._piecesBox()
+    const size = box.isEmpty() ? 50 : box.getSize(new THREE.Vector3()).length()
+    for (const e of entries) {
+      if (e.kind === 'plane' && e.plane) {
+        const w = size * 0.9
+        const geo = new THREE.PlaneGeometry(w, w)
+        const mat = new THREE.MeshBasicMaterial({
+          color: e.enabled ? 0x3b82f6 : 0x64748b,
+          transparent: true,
+          opacity: e.enabled ? 0.14 : 0.06,
+          side: THREE.DoubleSide,
+          depthWrite: false
+        })
+        const quad = new THREE.Mesh(geo, mat)
+        quad.position.fromArray(e.plane.pos)
+        quad.quaternion.fromArray(e.plane.quat)
+        const edge = new THREE.LineSegments(
+          new THREE.EdgesGeometry(geo),
+          new THREE.LineBasicMaterial({ color: e.enabled ? 0x3b82f6 : 0x64748b, transparent: true, opacity: 0.5 })
+        )
+        quad.add(edge)
+        this._draftGroup.add(quad)
+      } else if (e.kind === 'curved' && e.points?.length >= 2 && e.viewDir) {
+        const wall = this._buildCurveWall(
+          e.points.map((p) => new THREE.Vector3(p.x, p.y, p.z)),
+          e.viewDir,
+          e.params?.kerf,
+          box
+        )
+        wall.material.color.setHex(e.enabled ? 0x38d6e0 : 0x64748b)
+        wall.material.opacity = e.enabled ? 0.16 : 0.05
+        this._draftGroup.add(wall)
+        const lineGeo = new THREE.BufferGeometry().setFromPoints(
+          e.points.map((p) => new THREE.Vector3(p.x, p.y, p.z))
+        )
+        this._draftGroup.add(
+          new THREE.Line(
+            lineGeo,
+            new THREE.LineBasicMaterial({ color: e.enabled ? 0xff5c7a : 0x64748b, transparent: true, opacity: 0.6 })
+          )
+        )
+      }
+    }
+  }
+
+  clearDraftPreview() {
+    if (!this._draftGroup) return
+    this._draftGroup.traverse((o) => {
+      if (o.geometry) o.geometry.dispose()
+      if (o.material) o.material.dispose()
+    })
+    this.scene.remove(this._draftGroup)
+    this._draftGroup = null
   }
 
   clearCurvePreview() {

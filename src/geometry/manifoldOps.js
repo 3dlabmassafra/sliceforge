@@ -522,7 +522,84 @@ function manifoldToGeometry(manifold) {
     g.setAttribute('position', new THREE.BufferAttribute(mesh.vertProperties.slice(), 3))
   }
   g.setIndex(new THREE.BufferAttribute(mesh.triVerts.slice(), 1))
-  return niceNormals(g)
+  return cleanF32Slivers(niceNormals(g))
+}
+
+/**
+ * Boolean outputs can contain zero-width fins (e.g. a connector cylinder
+ * tangent to a cut wall): two surfaces a fraction of a micron apart, which
+ * the float32 rounding collapses onto each other — duplicating edges and
+ * breaking slicers. Weld vertices that are identical in float32, drop the
+ * triangles that become degenerate, and only keep the result when every
+ * remaining edge still pairs up perfectly (otherwise keep the original).
+ */
+function cleanF32Slivers(g) {
+  const pos = g.attributes.position
+  const col = g.attributes.color
+  const srcIdx = g.index ? g.index.array : null
+  const F = (srcIdx ? srcIdx.length : pos.count) / 3
+  if (!F) return g
+  // 1. weld vertices that share a position on the 0.1µm grid (the same
+  //    resolution slicers and the watertight check work at)
+  const map = new Map()
+  const remap = new Uint32Array(pos.count)
+  let next = 0
+  for (let v = 0; v < pos.count; v++) {
+    const k =
+      Math.round(pos.getX(v) * 1e4) + ',' + Math.round(pos.getY(v) * 1e4) + ',' + Math.round(pos.getZ(v) * 1e4)
+    let m = map.get(k)
+    if (m === undefined) map.set(k, (m = next++))
+    remap[v] = m
+  }
+  if (next === pos.count) return g // nothing collapsed
+  // 2. drop triangles degenerate or duplicated after the weld
+  const seen = new Set()
+  const tri = []
+  for (let t = 0; t < F; t++) {
+    const a = remap[srcIdx ? srcIdx[t * 3] : t * 3]
+    const b = remap[srcIdx ? srcIdx[t * 3 + 1] : t * 3 + 1]
+    const c = remap[srcIdx ? srcIdx[t * 3 + 2] : t * 3 + 2]
+    if (a === b || b === c || a === c) continue
+    const key = [a, b, c].sort((x, y) => x - y).join(',')
+    if (seen.has(key)) continue
+    seen.add(key)
+    tri.push(a, b, c)
+  }
+  // 3. accept only a perfectly paired (watertight, no duplicates) result
+  const dirCount = new Map()
+  for (let i = 0; i < tri.length; i += 3) {
+    for (let e = 0; e < 3; e++) {
+      const p = tri[i + e]
+      const q = tri[i + ((e + 1) % 3)]
+      const dk = p * next + q
+      dirCount.set(dk, (dirCount.get(dk) ?? 0) + 1)
+    }
+  }
+  for (const [dk, cnt] of dirCount) {
+    if (cnt !== 1) return g
+    const p = Math.floor(dk / next)
+    const q = dk % next
+    if (!dirCount.has(q * next + p)) return g
+  }
+  // 4. rebuild compact geometry
+  const out = new THREE.BufferGeometry()
+  const posArr = new Float32Array(next * 3)
+  const colArr = col ? new Float32Array(next * 3) : null
+  for (let v = 0; v < pos.count; v++) {
+    const m = remap[v]
+    posArr[m * 3] = pos.getX(v)
+    posArr[m * 3 + 1] = pos.getY(v)
+    posArr[m * 3 + 2] = pos.getZ(v)
+    if (colArr) {
+      colArr[m * 3] = col.getX(v)
+      colArr[m * 3 + 1] = col.getY(v)
+      colArr[m * 3 + 2] = col.getZ(v)
+    }
+  }
+  out.setAttribute('position', new THREE.BufferAttribute(posArr, 3))
+  if (colArr) out.setAttribute('color', new THREE.BufferAttribute(colArr, 3))
+  out.setIndex(new THREE.BufferAttribute(new Uint32Array(tri), 1))
+  return niceNormals(out)
 }
 
 // Paint cut-face triangles flat grey (non-indexed geometry only: each face
@@ -571,7 +648,7 @@ function pinPlacements(wasm, solid, params) {
   } else {
     spots = pinSpots(polys, r, tol, params.spacing)
   }
-  const testR = r + tol + PIN_WALL
+  const testR = (r + tol + PIN_WALL) * (params.connectorType === 'dovetail' ? 1.28 : 1)
   const testH = h + 2 * tol + 2 * PIN_WALL
   const placements = []
   for (const [x, y] of spots) {
@@ -809,25 +886,33 @@ export async function planeCut(geometry, plane, params) {
     }
 
     if (params.pins) {
-      // Connector shapes: round/square/hex pegs (one piece carries the peg,
-      // the other the socket) or dowel holes (both pieces get the same hole,
-      // a separate wooden/printed dowel bridges them).
+      // Connector shapes: round/square/hex/dovetail pegs (one piece carries
+      // the peg, the other the socket) or dowel holes (both pieces get the
+      // same hole, a separate wooden/printed dowel bridges them).
       const type = params.connectorType || 'pin'
-      const seg = { pin: 48, square: 4, hex: 6, dowel: 48 }[type] ?? 48
       const r = Math.max(0.2, params.pinDiameter / 2)
       const h = Math.max(1, params.pinLength)
       const tol = Math.max(0, params.tolerance)
       // Tapered pegs (tip 80% of base radius) slide into their socket without
       // fighting the first layers — much easier to assemble than straight pins.
       const rTip = params.taper && type !== 'dowel' ? r * 0.8 : r
+      const rot = ((params.connectorRot ?? 0) * Math.PI) / 180
+      // Which piece carries the peg: 'a' = below the plane (default),
+      // 'b' = above it. The peg tip always points into the socket piece.
+      const pegAxis = new THREE.Vector3(0, 0, params.pinSide === 'b' ? -1 : 1)
       const placements = pinPlacements(wasm, solid, params)
       if (type === 'dowel') dowelCount = placements.length
       for (const [x, y, off] of placements) {
-        if (type === 'dowel') {
-          const hole = matchProps(
-            Manifold.cylinder(h + 2 * tol, r + tol, r + tol, seg, true).translate([x, y, off]),
+        const mkPin = (rr, rt, hh) =>
+          matchProps(
+            geometryToManifold(
+              wasm,
+              pinGeometry3D({ type, r: rr, rTip: rt, h: hh, rot, axis: pegAxis, center: new THREE.Vector3(x, y, off) })
+            ),
             hasColor
           )
+        if (type === 'dowel') {
+          const hole = mkPin(r + tol, r + tol, h + 2 * tol)
           cleanup.push(hole)
           const t2 = top.subtract(hole)
           const b2 = bottom.subtract(hole)
@@ -836,23 +921,33 @@ export async function planeCut(geometry, plane, params) {
           bottom = b2
           continue
         }
-        const peg = matchProps(
-          Manifold.cylinder(h, r, rTip, seg, true).translate([x, y, off]),
-          hasColor
-        )
-        const socket = matchProps(
-          Manifold.cylinder(h + 2 * tol, r + tol, rTip + tol, seg, true).translate([x, y, off]),
-          hasColor
-        )
+        const peg = mkPin(r, rTip, h)
+        const socket = mkPin(r + tol, rTip + tol, h + 2 * tol)
         cleanup.push(peg, socket)
-        const b2 = bottom.add(peg)
-        const t2 = top.subtract(socket)
-        cleanup.push(b2, t2)
-        bottom = b2
-        top = t2
+        if (params.pinSide === 'b') {
+          const t2 = top.add(peg)
+          const b2 = bottom.subtract(socket)
+          cleanup.push(t2, b2)
+          top = t2
+          bottom = b2
+        } else {
+          const b2 = bottom.add(peg)
+          const t2 = top.subtract(socket)
+          cleanup.push(b2, t2)
+          bottom = b2
+          top = t2
+        }
       }
     }
 
+    // Booleans around connector cylinders can leave sub-micron slivers
+    // that collapse (and duplicate edges) once rounded to float32;
+    // simplify(1µm) cleans them without touching real features.
+    const topS = top.simplify(0.001)
+    const bottomS = bottom.simplify(0.001)
+    cleanup.push(topS, bottomS)
+    if (topS.numTri()) top = topS
+    if (bottomS.numTri()) bottom = bottomS
     const gTop = manifoldToGeometry(top)
     const gBottom = manifoldToGeometry(bottom)
     if (hasColor) {
@@ -973,6 +1068,7 @@ export async function curvedCut(geometry, points, viewDir, params = {}) {
   const { CrossSection } = wasm
   const kerf = Math.max(params.kerf ?? 0.15, 0.02)
   const w2 = kerf / 2
+  const hasColor = !!geometry.attributes.color
 
   // Local frame: x/y = screen plane, z = view axis, origin = first point.
   const { u, v, n } = viewBasis(new THREE.Vector3(...viewDir))
@@ -994,6 +1090,7 @@ export async function curvedCut(geometry, points, viewDir, params = {}) {
     const l = new THREE.Vector3(...p).applyMatrix4(inv)
     return [l.x, l.y]
   })
+  const drawn2 = pts2.map((p) => [p[0], p[1]]) // pre-extension copy (pin candidates)
   const ext = radius * 1.5 + 10
   const d0 = norm2(sub2(pts2[1], pts2[0]))
   if (d0 > 1e-9) {
@@ -1036,14 +1133,231 @@ export async function curvedCut(geometry, points, viewDir, params = {}) {
   gLocal.dispose()
   const carved = solid.subtract(wall)
   wall.delete()
-  solid.delete()
-  const out = []
-  for (const part of carved.decompose()) {
-    if (!part.isEmpty()) out.push(manifoldToGeometry(part).applyMatrix4(M))
-    part.delete()
+
+  const cleanup = []
+  let parts = []
+  try {
+    parts = carved.decompose().filter((p) => !p.isEmpty())
+
+    let dowelCount = 0
+    if (params.pins && drawn2.length >= 2 && parts.length >= 2) {
+      dowelCount = applyCurvedPins(wasm, solid, parts, { drawn2, bb, kerf, w2, params, cleanup, hasColor })
+    }
+
+    const out = []
+    for (const part of parts) {
+      // Booleans around connector cylinders can leave sub-micron slivers
+      // that collapse (and duplicate edges) once rounded to float32;
+      // simplify(1µm) cleans them without touching real features.
+      const simp = part.simplify(0.001)
+      cleanup.push(simp)
+      out.push(manifoldToGeometry(simp.numTri() ? simp : part).applyMatrix4(M))
+    }
+    out.dowelCount = dowelCount
+    return out
+  } finally {
+    solid.delete()
+    carved.delete()
+    for (const p of parts) {
+      try {
+        p.delete()
+      } catch {
+        /* consumed */
+      }
+    }
+    for (const m of cleanup) {
+      try {
+        m.delete()
+      } catch {
+        /* consumed */
+      }
+    }
   }
-  carved.delete()
-  return out
+}
+
+/**
+ * Connectors for the freehand cut: pegs and sockets bridging the pieces
+ * along the drawn curve. Each pin's axis is the curve's local in-plane
+ * normal; its depth along the view axis is centered in the widest
+ * material interval found there (ray cast on the original solid), and the
+ * final fit is validated with an exact boolean containment test — the
+ * same approach as the plane cut's pinPlacements.
+ * Returns the dowel count (0 for peg types).
+ */
+function applyCurvedPins(wasm, solid, parts, ctx) {
+  const { drawn2, bb, kerf, w2, params, cleanup, hasColor } = ctx
+  const r = Math.max(0.2, (params.pinDiameter ?? 6) / 2)
+  const h = Math.max(1, params.pinLength ?? 8)
+  const tol = Math.max(0, params.tolerance ?? 0.15)
+  const spacing = Math.max(r * 3, params.spacing ?? 25)
+  const rot = ((params.connectorRot ?? 0) * Math.PI) / 180
+  const pegOnPositive = params.pinSide === 'b'
+  const type = params.connectorType || 'pin'
+  const isDowel = type === 'dowel'
+  const rTip = params.taper !== false && !isDowel ? r * 0.8 : r
+
+  // Sorted hit distances (mm) along a segment on the original solid —
+  // rayCast returns fractions of the segment length, so scale by it.
+  const hitsAlong = (a, b) => {
+    const len = a.distanceTo(b)
+    return solid
+      .rayCast([a.x, a.y, a.z], [b.x, b.y, b.z])
+      .map((hh) => hh.distance * len)
+      .sort((x, y) => x - y)
+  }
+
+  // Candidates along the drawn polyline (arc length).
+  const cands = []
+  for (let i = 0; i + 1 < drawn2.length; i++) {
+    const [ax, ay] = drawn2[i]
+    const [bx, by] = drawn2[i + 1]
+    const len = Math.hypot(bx - ax, by - ay)
+    if (len < 1e-9) continue
+    let s = 0
+    while (s <= len) {
+      const t = s / len
+      cands.push({ x: ax + (bx - ax) * t, y: ay + (by - ay) * t, tx: (bx - ax) / len, ty: (by - ay) / len })
+      s += Math.max(2, spacing / 4)
+    }
+  }
+
+  const zMin = bb.min.z
+  const zMax = bb.max.z
+  const accepted = []
+  for (const c of cands) {
+    if (accepted.length) {
+      const lastP = accepted[accepted.length - 1]
+      if (Math.hypot(c.x - lastP.x, c.y - lastP.y) < spacing) continue
+    }
+    // In-plane normal of the curve at this candidate.
+    const m = new THREE.Vector3(c.ty, -c.tx, 0)
+    // Depth: material intervals along the view axis at (x, y) — the pin
+    // cross-section must fit inside the widest one.
+    const ds = hitsAlong(new THREE.Vector3(c.x, c.y, zMin - 1), new THREE.Vector3(c.x, c.y, zMax + 1))
+    let best = null
+    for (let i = 0; i + 1 < ds.length; i += 2) {
+      const zA = zMin - 1 + ds[i]
+      const zB = zMin - 1 + ds[i + 1]
+      if (zB - zA < 2 * (r + tol + PIN_WALL)) continue
+      if (!best || zB - zA > best[1] - best[0]) best = [zA, zB]
+    }
+    if (!best) continue
+    accepted.push({ ...c, m, zc: (best[0] + best[1]) / 2 })
+  }
+
+  // Exact fit test: the tester pin must sit fully inside the material
+  // (the kerf region is still material in the original solid).
+  const fitsInside = (geo) => {
+    const tester = geometryToManifold(wasm, geo)
+    const leak = tester.subtract(solid)
+    const fits = leak.isEmpty() || leak.volume() < 0.05
+    tester.delete()
+    leak.delete()
+    return fits
+  }
+
+  // Which piece owns a probe point? Odd number of ray hits = inside.
+  const pieceAt = (p) => {
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i]
+      const pb = part.boundingBox()
+      if (
+        p.x < pb.min[0] - 1e-6 || p.x > pb.max[0] + 1e-6 ||
+        p.y < pb.min[1] - 1e-6 || p.y > pb.max[1] + 1e-6 ||
+        p.z < pb.min[2] - 1e-6 || p.z > pb.max[2] + 1e-6
+      ) continue
+      const dir = new THREE.Vector3(0.577, 0.577, 0.577).normalize()
+      const end = p.clone().addScaledVector(dir, radiusOf(bb) * 3)
+      const hits = part.rayCast([p.x, p.y, p.z], [end.x, end.y, end.z])
+      if (hits.length % 2 === 1) return i
+    }
+    return -1
+  }
+
+  let dowelCount = 0
+  for (const pin of accepted) {
+    const center = new THREE.Vector3(pin.x, pin.y, pin.zc)
+    const pegDir = pin.m.clone().multiplyScalar(pegOnPositive ? 1 : -1)
+    const mkGeo = (rr, rt, hh) => pinGeometry3D({ type, r: rr, rTip: rt, h: hh, rot, axis: pegDir, center })
+    if (!fitsInside(mkGeo(r + tol + PIN_WALL, rTip + tol + PIN_WALL, h + 2 * tol + 2 * PIN_WALL))) continue
+    // Probe just outside the kerf on each side of the wall.
+    const probeDist = w2 + Math.min(0.5, r * 0.2) + 1e-3
+    const iA = pieceAt(center.clone().addScaledVector(pegDir, probeDist))
+    const iB = pieceAt(center.clone().addScaledVector(pegDir, -probeDist))
+    if (iA < 0 || iB < 0 || iA === iB) continue
+
+    const mkPin = (rr, rt, hh) => matchProps(geometryToManifold(wasm, mkGeo(rr, rt, hh)), hasColor)
+    if (isDowel) {
+      const hole = mkPin(r + tol, r + tol, h + 2 * tol)
+      cleanup.push(hole)
+      for (const idx of new Set([iA, iB])) {
+        const p2 = parts[idx].subtract(hole)
+        cleanup.push(p2)
+        parts[idx] = p2
+      }
+      dowelCount++
+      continue
+    }
+    const peg = mkPin(r, rTip, h)
+    const socket = mkPin(r + tol, rTip + tol, h + 2 * tol)
+    cleanup.push(peg, socket)
+    const withPeg = parts[iA].add(peg)
+    const withSocket = parts[iB].subtract(socket)
+    cleanup.push(withPeg, withSocket)
+    parts[iA] = withPeg
+    parts[iB] = withSocket
+  }
+  return dowelCount
+}
+
+function radiusOf(bb) {
+  return Math.hypot(bb.max.x - bb.min.x, bb.max.y - bb.min.y, bb.max.z - bb.min.z) / 2
+}
+
+/**
+ * Oriented connector solid as a THREE geometry (local cut frame): a
+ * cylinder / square / hex prism / dovetail with its axis along `axis`,
+ * self-rotated by `rot`, centered at `center`. The tip (+axis end) is the
+ * narrow end for tapered pins and dovetails.
+ */
+function pinGeometry3D({ type, r, rTip, h, rot, axis, center }) {
+  let geo
+  if (type === 'square') {
+    geo = new THREE.BoxGeometry(2 * r, h, 2 * r)
+  } else if (type === 'dovetail') {
+    // Trapezoid prism: wide at the root, narrow at the tip — resists
+    // pull-out and eases insertion like a tapered peg.
+    const wBase = 2 * r
+    const wTip = 1.4 * r
+    const depth = 1.6 * r
+    const corners = []
+    const push = (x, y, z) => corners.push(x, y, z)
+    // base rect (y = -h/2), tip rect (y = +h/2)
+    push(-wBase / 2, -h / 2, -depth / 2); push(wBase / 2, -h / 2, -depth / 2)
+    push(wBase / 2, -h / 2, depth / 2); push(-wBase / 2, -h / 2, depth / 2)
+    push(-wTip / 2, h / 2, -depth / 2); push(wTip / 2, h / 2, -depth / 2)
+    push(wTip / 2, h / 2, depth / 2); push(-wTip / 2, h / 2, depth / 2)
+    const V = corners
+    const faces = [
+      [0, 3, 2, 1], // base (y-)
+      [4, 5, 6, 7], // tip (y+)
+      [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7] // sides
+    ]
+    const pos = []
+    for (const f of faces) {
+      for (const i of [0, 1, 2, 0, 2, 3]) pos.push(V[f[i] * 3], V[f[i] * 3 + 1], V[f[i] * 3 + 2])
+    }
+    geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3))
+  } else {
+    const seg = type === 'hex' ? 6 : 48
+    geo = new THREE.CylinderGeometry(rTip, r, h, seg)
+  }
+  const qSelf = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rot)
+  const qAlign = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), axis.clone().normalize())
+  geo.applyQuaternion(qAlign.multiply(qSelf))
+  geo.translate(center.x, center.y, center.z)
+  return geo
 }
 
 function sub2(a, b) {

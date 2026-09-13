@@ -118,6 +118,56 @@ try {
   const nPz = await countPieces()
   check('puzzle generates multiple pieces', nPz > 1, `${nPz} pieces`)
 
+  // --- reload, draft mode: plan two plane cuts, disable one, build ---
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(
+    () => document.querySelectorAll('.piece-item').length === 1,
+    null,
+    { timeout: 60000 }
+  )
+  await waitNotBusy()
+
+  // enter draft mode from the header toggle
+  await page.locator('header .draft-toggle').click()
+  const draftPanel = page.locator('.draft-panel')
+  check('draft panel opens', (await draftPanel.count()) === 1)
+
+  // plan cut #1: plane (default position, through the middle)
+  await page.locator('.viewport-toolbar button').first().click() // plane tool
+  await page.locator('.cut-btn-execute').click()
+  await page.waitForTimeout(200)
+  check('pieces untouched while drafting', (await countPieces()) === 1)
+
+  // plan cut #2: freehand curved cut
+  await page.locator('.viewport-toolbar button[title="Taglio curvo a mano libera"]').click()
+  const cbox2 = await canvas.boundingBox()
+  for (const [fx, fy] of [
+    [0.48, 0.42],
+    [0.52, 0.48],
+    [0.47, 0.55],
+    [0.52, 0.62]
+  ]) {
+    await page.mouse.click(cbox2.x + cbox2.width * fx, cbox2.y + cbox2.height * fy)
+    await page.waitForTimeout(120)
+  }
+  await page.locator('button.primary', { hasText: 'Aggiungi al piano' }).click()
+  await page.waitForTimeout(300)
+  const entries = await page.locator('.draft-entry').count()
+  check('draft collects 2 planned cuts', entries === 2, `${entries} entries`)
+
+  // disable the curved entry, build: expect 2 pieces from the plane cut only
+  await page.locator('.draft-entry').nth(1).locator('input[type="checkbox"]').click()
+  await page.locator('.draft-panel button.primary').click()
+  await page.waitForFunction(
+    () => document.querySelectorAll('.piece-item').length === 2,
+    null,
+    { timeout: 180000 }
+  )
+  await waitNotBusy(180000)
+  const nDraft = await countPieces()
+  check('draft build applies enabled cuts only', nDraft === 2, `${nDraft} pieces`)
+  check('draft mode exits after build', (await draftPanel.count()) === 0)
+
   // no runtime errors anywhere
   const errorBox = await page.locator('.error').count()
   check('no in-app error banner', errorBox === 0)

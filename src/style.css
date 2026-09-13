@@ -797,3 +797,44 @@ button.link {
 }
 button.link:hover { text-decoration: underline; background: none; }
 button.link:disabled { opacity: 0.45; cursor: default; }
+
+/* === Draft mode (non-destructive cut plan) === */
+.icon-btn.draft-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 0 10px;
+}
+.icon-btn.draft-toggle svg {
+  width: 15px;
+  height: 15px;
+}
+.icon-btn.draft-toggle.active {
+  background: rgba(59, 130, 246, 0.25);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.draft-panel {
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(59, 130, 246, 0.07);
+}
+.draft-panel h3 {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  margin: 0 0 6px;
+}
+.draft-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+.draft-entry .link {
+  padding: 0 4px;
+  font-size: 12px;
+}

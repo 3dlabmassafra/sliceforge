@@ -71,6 +71,7 @@ export const CONNECTOR_PRESETS = {
   pin: { pinDiameter: 6, pinLength: 8, tolerance: 0.15, spacing: 25 },
   square: { pinDiameter: 6, pinLength: 8, tolerance: 0.2, spacing: 25 },
   hex: { pinDiameter: 6, pinLength: 8, tolerance: 0.2, spacing: 25 },
+  dovetail: { pinDiameter: 8, pinLength: 10, tolerance: 0.2, spacing: 25 },
   dowel: { pinDiameter: 8, pinLength: 35, tolerance: 0.2, spacing: 45 }
 }
 
@@ -89,6 +90,9 @@ export const useStore = create((set, get) => ({
 
   modelName: null,
   pieces: [],
+  draftMode: false,
+  draftCuts: [],
+  draftSource: null,
   history: [],
   future: [],
   busy: false,
@@ -231,6 +235,8 @@ export const useStore = create((set, get) => ({
     tolerance: 0.15,
     taper: true,
     connectorType: 'pin',
+    connectorRot: 0,
+    pinSide: 'a',
     spacing: 25
   },
   setCutParams: (patch) => set((s) => ({ cutParams: { ...s.cutParams, ...patch } })),
@@ -396,6 +402,40 @@ export const useStore = create((set, get) => ({
 
   setPiecesBulk: (pieces) =>
     set((s) => ({ pieces, ...pushEntry(s, { kind: 'snapshot', pieces: s.pieces }) })),
+
+  // === Non-destructive cut plan (draft mode) ===
+  // The real pieces are never touched while planning: cuts are collected as
+  // entries and only applied, in order, when the user builds.
+  setDraftMode: (on) =>
+    set((s) => {
+      if (!on) return { draftMode: false, draftCuts: [], draftSource: null }
+      return {
+        draftMode: true,
+        draftCuts: [],
+        draftSource: s.pieces.map((p) => ({ ...p }))
+      }
+    }),
+  addDraftCut: (entry) =>
+    set((s) => ({
+      draftCuts: [...s.draftCuts, { enabled: true, ...entry, id: newPieceId() }]
+    })),
+  updateDraftCut: (id, patch) =>
+    set((s) => ({
+      draftCuts: s.draftCuts.map((c) => (c.id === id ? { ...c, ...patch } : c))
+    })),
+  toggleDraftCut: (id) =>
+    set((s) => ({
+      draftCuts: s.draftCuts.map((c) => (c.id === id ? { ...c, enabled: !c.enabled } : c))
+    })),
+  removeDraftCut: (id) => set((s) => ({ draftCuts: s.draftCuts.filter((c) => c.id !== id) })),
+  setDraftApplied: (pieces) =>
+    set((s) => ({
+      pieces,
+      draftMode: false,
+      draftCuts: [],
+      draftSource: null,
+      ...pushEntry(s, { kind: 'snapshot', pieces: s.pieces })
+    })),
 
   replaceAllGeometries: (geoms) =>
     set((s) => {
