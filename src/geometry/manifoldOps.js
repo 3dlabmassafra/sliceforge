@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import Module from 'manifold-3d'
 import { MeshoptSimplifier } from 'meshoptimizer'
-import { planeBasis } from './plane.js'
+import { planeBasis, viewBasis } from './plane.js'
 import { reservationsCollide } from './collide.js'
 import { niceNormals } from './normals.js'
 
@@ -957,4 +957,98 @@ export async function simplifyGeometry(geometry, ratio) {
   if (colors) g.setAttribute('color', new THREE.BufferAttribute(colors, 3))
   g.setIndex(new THREE.BufferAttribute(newIndex, 1))
   return niceNormals(g)
+}
+
+/**
+ * Freehand curved cut: the user clicked a polyline ON the model surface; the
+ * cutting wall follows the drawn curve and runs through the model along the
+ * drawing view direction (Blender "knife project" style). The wall is built
+ * as a 2D slab (the curve thickened by the kerf) extruded along the view
+ * axis — every clicked surface point lies on the wall, so what you drew is
+ * exactly where the visible surface gets cut.
+ */
+export async function curvedCut(geometry, points, viewDir, params = {}) {
+  if (!points || points.length < 2) throw new Error('curved cut needs at least 2 points')
+  const wasm = await getWasm()
+  const { CrossSection } = wasm
+  const kerf = Math.max(params.kerf ?? 0.15, 0.02)
+  const w2 = kerf / 2
+
+  // Local frame: x/y = screen plane, z = view axis, origin = first point.
+  const { u, v, n } = viewBasis(new THREE.Vector3(...viewDir))
+  const origin = new THREE.Vector3(...points[0])
+  const M = new THREE.Matrix4().makeBasis(u, v, n).setPosition(origin)
+  const inv = M.clone().invert()
+
+  // Model in the local frame: the wall must span its full depth and width.
+  const gLocal = geometry.clone().applyMatrix4(inv)
+  gLocal.computeBoundingBox()
+  const bb = gLocal.boundingBox
+  const radius = gLocal.boundingBox.getSize(new THREE.Vector3()).length() / 2
+  const margin = radius * 0.1 + 1
+  const z0 = bb.min.z - margin
+  const zDepth = bb.max.z - bb.min.z + 2 * margin
+
+  // The drawn curve in 2D, ends extended straight so the wall exits the model.
+  const pts2 = points.map((p) => {
+    const l = new THREE.Vector3(...p).applyMatrix4(inv)
+    return [l.x, l.y]
+  })
+  const ext = radius * 1.5 + 10
+  const d0 = norm2(sub2(pts2[1], pts2[0]))
+  if (d0 > 1e-9) {
+    const t = [pts2[1][0] - pts2[0][0], pts2[1][1] - pts2[0][1]]
+    pts2.unshift([pts2[0][0] - (t[0] / d0) * ext, pts2[0][1] - (t[1] / d0) * ext])
+  }
+  const last = pts2.length - 1
+  const dN = norm2(sub2(pts2[last], pts2[last - 1]))
+  if (dN > 1e-9) {
+    const t = [pts2[last][0] - pts2[last - 1][0], pts2[last][1] - pts2[last - 1][1]]
+    pts2.push([pts2[last][0] + (t[0] / dN) * ext, pts2[last][1] + (t[1] / dN) * ext])
+  }
+
+  // 2D slab = union of one rectangle per segment (robust at any joint
+  // angle). All rects share the same winding, so the NonZero fill rule
+  // unions them even where they overlap at the joints.
+  const polys = []
+  for (let i = 0; i + 1 < pts2.length; i++) {
+    const [ax, ay] = pts2[i]
+    const [bx, by] = pts2[i + 1]
+    const dx = bx - ax
+    const dy = by - ay
+    const len = Math.hypot(dx, dy)
+    if (len < 1e-9) continue
+    const nx = -dy / len
+    const ny = dx / len
+    polys.push([
+      [ax - nx * w2, ay - ny * w2],
+      [bx - nx * w2, by - ny * w2],
+      [bx + nx * w2, by + ny * w2],
+      [ax + nx * w2, ay + ny * w2]
+    ])
+  }
+  if (!polys.length) throw new Error('degenerate curve')
+  const cs = new CrossSection(polys, 'NonZero')
+
+  // Wall through the whole model depth, then subtract and split into parts.
+  const wall = cs.extrude(zDepth).translate([0, 0, z0])
+  const solid = geometryToManifold(wasm, gLocal)
+  gLocal.dispose()
+  const carved = solid.subtract(wall)
+  wall.delete()
+  solid.delete()
+  const out = []
+  for (const part of carved.decompose()) {
+    if (!part.isEmpty()) out.push(manifoldToGeometry(part).applyMatrix4(M))
+    part.delete()
+  }
+  carved.delete()
+  return out
+}
+
+function sub2(a, b) {
+  return [a[0] - b[0], a[1] - b[1]]
+}
+function norm2(a) {
+  return Math.hypot(a[0], a[1])
 }

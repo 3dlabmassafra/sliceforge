@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
-import { AXIS_QUATS } from '../geometry/plane.js'
+import { AXIS_QUATS, viewBasis } from '../geometry/plane.js'
 import { computeSectionSegments } from '../geometry/sectionContour.js'
 import { coplanarRegion, growRegion, regionPositions } from '../geometry/shapeSelect.js'
 
@@ -126,10 +126,12 @@ export class Viewer {
     this.shapeMode = false
     this.planeMode = false
     this.pinMode = false
+    this.curveMode = false
     this.selectedPieceId = null
     this._raycaster = new THREE.Raycaster()
     this._downPos = null
     this._isBrushing = false
+    this.onCurvePoint = null
     canvas.addEventListener('pointerdown', (e) => {
       if (e.button === 2) {
         this._rDownPos = [e.clientX, e.clientY]
@@ -201,6 +203,26 @@ export class Viewer {
         }
         return
       }
+      // Freehand-curve hover: a small marker glides over the surface so the
+      // user sees where the next point would land.
+      if (this.curveMode) {
+        setRay()
+        const hit = this._raycaster.intersectObjects(
+          this.piecesGroup.children.filter((m) => m.visible),
+          false
+        )[0]
+        if (hit) {
+          this._ensureCurveHover()
+          this._curveHover.visible = true
+          this._curveHover.position.copy(hit.point)
+          canvas.style.cursor = 'crosshair'
+        } else if (this._curveHover) {
+          this._curveHover.visible = false
+          canvas.style.cursor = ''
+        }
+        return
+      }
+      if (this._curveHover) this._curveHover.visible = false
       // Place-on-face hover: light up the facet under the cursor so the user
       // sees WHICH face will land on the plate before clicking.
       if (this.faceMode) {
@@ -314,7 +336,7 @@ export class Viewer {
         }
         return
       }
-      if (this.faceMode || this.shapeMode || this.planeMode) {
+      if (this.faceMode || this.shapeMode || this.planeMode || this.curveMode) {
         // Precise triangle raycast (meshes carry no rotation, so face data
         // is already in world space).
         const hits = this._raycaster.intersectObjects(
@@ -331,7 +353,13 @@ export class Viewer {
           }
           return
         }
-        if (this.shapeMode) {
+        if (this.curveMode) {
+          // A click on the model adds a point to the freehand cut line; the
+          // camera axis at that moment is the wall direction (locked by the
+          // App on the first point).
+          const dir = this.camera.getWorldDirection(new THREE.Vector3())
+          this.onCurvePoint?.(hit.point.clone(), dir)
+        } else if (this.shapeMode) {
           // Seed click: start/replace the selection AND enter paint mode —
           // from here the cursor brushes (accumulates) until the user
           // clicks the void or leaves the tool.
@@ -875,6 +903,147 @@ export class Viewer {
 
   // Ghost the parts so the plane (and the connectors on it) read through
   // the material while placing.
+  // === Freehand curved cut ===
+  // Live preview of the drawn line: sphere markers at the clicked surface
+  // points, a polyline through them, and the translucent cutting wall that
+  // will run through the model (same projection the worker uses).
+  _ensureCurveHover() {
+    if (this._curveHover) return
+    const geo = new THREE.SphereGeometry(1, 12, 10)
+    const mat = new THREE.MeshBasicMaterial({ color: 0xff5c7a })
+    this._curveHover = new THREE.Mesh(geo, mat)
+    this._curveHover.visible = false
+    this.scene.add(this._curveHover)
+  }
+
+  setCurvePreview(points, viewDir, kerf) {
+    this.clearCurvePreview()
+    if (!points || points.length < 1 || !viewDir) return
+    if (!this._curveGroup) {
+      this._curveGroup = new THREE.Group()
+      this.scene.add(this._curveGroup)
+    }
+    // Scale markers to the model so they stay visible at any zoom.
+    const box = new THREE.Box3()
+    for (const m of this.piecesGroup.children) {
+      if (m.visible) box.expandByObject(m)
+    }
+    const size = box.isEmpty() ? 50 : box.getSize(new THREE.Vector3()).length()
+    const markerR = size * 0.008
+
+    const markerGeo = new THREE.SphereGeometry(markerR, 12, 10)
+    const markerMat = new THREE.MeshBasicMaterial({ color: 0xff5c7a })
+    const pts3 = points.map((p) => new THREE.Vector3(p.x, p.y, p.z))
+    pts3.forEach((p) => {
+      const s = new THREE.Mesh(markerGeo, markerMat)
+      s.position.copy(p)
+      this._curveGroup.add(s)
+    })
+
+    if (pts3.length >= 2) {
+      const lineGeo = new THREE.BufferGeometry().setFromPoints(pts3)
+      const lineMat = new THREE.LineBasicMaterial({ color: 0xff5c7a, linewidth: 2 })
+      this._curveGroup.add(new THREE.Line(lineGeo, lineMat))
+
+      // The wall: 2D projection of the curve on the view plane, ends
+      // extended, thickened by the kerf, extruded across the model depth.
+      const { u, v, n } = viewBasis(new THREE.Vector3(viewDir.x, viewDir.y, viewDir.z))
+      const origin = pts3[0].clone()
+      const toLocal = (p) => {
+        const d = p.clone().sub(origin)
+        return [d.dot(u), d.dot(v), d.dot(n)]
+      }
+      const pts2 = pts3.map((p) => {
+        const l = toLocal(p)
+        return [l[0], l[1]]
+      })
+      const radius = size / 2
+      const w2 = Math.max(kerf ?? 0.15, 0.02) / 2
+      const ext = radius * 1.5 + 10
+      const ext2 = (a, b, sign) => {
+        const dx = b[0] - a[0]
+        const dy = b[1] - a[1]
+        const len = Math.hypot(dx, dy)
+        if (len < 1e-9) return null
+        return [a[0] + (dx / len) * ext * sign, a[1] + (dy / len) * ext * sign]
+      }
+      const start = ext2(pts2[0], pts2[1], -1)
+      if (start) pts2.unshift(start)
+      const end = ext2(pts2[pts2.length - 1], pts2[pts2.length - 2], 1)
+      if (end) pts2.push(end)
+
+      // Depth range of the model along the view axis.
+      let tMin = Infinity
+      let tMax = -Infinity
+      const corner = new THREE.Vector3()
+      if (!box.isEmpty()) {
+        for (let xi = 0; xi < 2; xi++)
+          for (let yi = 0; yi < 2; yi++)
+            for (let zi = 0; zi < 2; zi++) {
+              corner.set(xi ? box.max.x : box.min.x, yi ? box.max.y : box.min.y, zi ? box.max.z : box.min.z)
+              const t = corner.clone().sub(origin).dot(n)
+              tMin = Math.min(tMin, t)
+              tMax = Math.max(tMax, t)
+            }
+      } else {
+        tMin = -radius
+        tMax = radius
+      }
+      const pad = (tMax - tMin) * 0.1 + 1
+      tMin -= pad
+      tMax += pad
+
+      const wallMat = new THREE.MeshBasicMaterial({
+        color: 0x38d6e0,
+        transparent: true,
+        opacity: 0.16,
+        side: THREE.DoubleSide,
+        depthWrite: false
+      })
+      const wallPos = []
+      const P = (x, y, t) =>
+        origin.clone().addScaledVector(u, x).addScaledVector(v, y).addScaledVector(n, t)
+      for (let i = 0; i + 1 < pts2.length; i++) {
+        const [ax, ay] = pts2[i]
+        const [bx, by] = pts2[i + 1]
+        const dx = bx - ax
+        const dy = by - ay
+        const len = Math.hypot(dx, dy)
+        if (len < 1e-9) continue
+        const nx = -dy / len
+        const ny = dx / len
+        const a1 = P(ax + nx * w2, ay + ny * w2, tMin)
+        const b1 = P(bx + nx * w2, by + ny * w2, tMin)
+        const c1 = P(bx - nx * w2, by - ny * w2, tMin)
+        const d1 = P(ax - nx * w2, ay - ny * w2, tMin)
+        const a2 = a1.clone().addScaledVector(n, tMax - tMin)
+        const b2 = b1.clone().addScaledVector(n, tMax - tMin)
+        const c2 = c1.clone().addScaledVector(n, tMax - tMin)
+        const d2 = d1.clone().addScaledVector(n, tMax - tMin)
+        for (const tri of [
+          [a1, b1, b2], [a1, b2, a2], // top edge
+          [c1, d1, d2], [c1, d2, c2], // bottom edge
+          [a2, b2, c2], [a2, c2, d2]  // far cap
+        ]) {
+          for (const p of tri) wallPos.push(p.x, p.y, p.z)
+        }
+      }
+      const wallGeo = new THREE.BufferGeometry()
+      wallGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(wallPos), 3))
+      this._curveGroup.add(new THREE.Mesh(wallGeo, wallMat))
+    }
+  }
+
+  clearCurvePreview() {
+    if (!this._curveGroup) return
+    this._curveGroup.traverse((o) => {
+      if (o.geometry) o.geometry.dispose()
+      if (o.material) o.material.dispose()
+    })
+    this.scene.remove(this._curveGroup)
+    this._curveGroup = null
+  }
+
   setPiecesGhost(on) {
     for (const mesh of this.piecesGroup.children) {
       mesh.material.transparent = on

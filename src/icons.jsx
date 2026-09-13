@@ -30,6 +30,14 @@ export const IconBox = () => (
   </svg>
 )
 
+export const IconCurve = () => (
+  <svg {...base}>
+    <path d="M2.5 12c3.5-7 6.5-7 9.5 0s6 7 9.5 0" />
+    <circle cx="2.5" cy="12" r="1.6" />
+    <circle cx="21.5" cy="12" r="1.6" />
+  </svg>
+)
+
 export const IconMove = () => (
   <svg {...base}>
     <line x1="12" y1="3.5" x2="12" y2="20.5" />

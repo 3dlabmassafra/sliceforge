@@ -48,6 +48,44 @@ try {
   const n2 = await countPieces()
   check('plane cut returns 2 pieces', n2 === 2)
 
+  // --- reload, freehand curved cut ---
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(
+    () => document.querySelectorAll('.piece-item').length === 1,
+    null,
+    { timeout: 60000 }
+  )
+  await waitNotBusy()
+
+  await page.locator('.viewport-toolbar button[title="Taglio curvo a mano libera"]').click()
+  // Draw a gentle S down the model's middle band (the model occupies the
+  // central third of the viewport horizontally).
+  const canvas = page.locator('canvas')
+  const cbox = await canvas.boundingBox()
+  const row = [
+    [0.48, 0.42],
+    [0.52, 0.48],
+    [0.47, 0.55],
+    [0.52, 0.62]
+  ]
+  for (const [fx, fy] of row) {
+    await page.mouse.click(cbox.x + cbox.width * fx, cbox.y + cbox.height * fy)
+    await page.waitForTimeout(120)
+  }
+  const ptsTxt = await page.locator('.dims', { hasText: 'Punti:' }).first().textContent()
+  const nPts = parseInt(ptsTxt.replace(/\D+/g, ''), 10)
+  check('curved line points collected', nPts >= 2, `${nPts} points`)
+  const curveBtn = page.locator('button.primary', { hasText: 'Esegui taglio curvo' })
+  await curveBtn.click()
+  await page.waitForFunction(
+    () => document.querySelectorAll('.piece-item').length === 2,
+    null,
+    { timeout: 180000 }
+  )
+  await waitNotBusy(180000)
+  const nCv = await countPieces()
+  check('curved cut returns 2 pieces', nCv === 2)
+
   // --- reload, puzzle flow ---
   await page.reload({ waitUntil: 'domcontentloaded' })
   await page.waitForFunction(

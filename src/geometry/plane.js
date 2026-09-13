@@ -12,6 +12,19 @@ export function planeBasis(plane) {
   return { normal, origin }
 }
 
+/**
+ * Orthonormal 2D basis for a freehand cut viewed along `n` (the camera axis):
+ * u = screen-right, v = screen-up, n = view direction. Used by BOTH the
+ * viewport preview and the worker-side cut so they agree on the projection.
+ */
+export function viewBasis(nVec) {
+  const n = nVec.clone().normalize()
+  const up = Math.abs(n.y) > 0.9 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(0, 1, 0)
+  const u = new THREE.Vector3().crossVectors(up, n).normalize()
+  const v = new THREE.Vector3().crossVectors(n, u).normalize()
+  return { u, v, n }
+}
+
 // Quaternions turning local +Z into each world axis.
 export const AXIS_QUATS = {
   x: new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(1, 0, 0)).toArray(),

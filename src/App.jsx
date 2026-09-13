@@ -6,9 +6,10 @@ import { Viewer, PIECE_COLORS } from './three/viewer.js'
 import { importModelFile, ACCEPTED } from './io/importers.js'
 import { exportSTL, exportOBJ, exportGLB, export3MF } from './io/exporters.js'
 import { AXIS_QUATS, AXIS_INFO, planeBasis, computePlateTransform } from './geometry/plane.js'
-import { planeCutAsync, simplifyAsync, volumeCutAsync, pinPreviewAsync } from './geometry/cutClient.js'
+import { planeCutAsync, simplifyAsync, volumeCutAsync, pinPreviewAsync, curvedCutAsync } from './geometry/cutClient.js'
 import {
   IconCut,
+  IconCurve,
   IconBox,
   IconMove,
   IconReset,
@@ -88,7 +89,8 @@ const TOOL_GROUPS = [
   [
     ['volume', <IconBox key="b" />, 'volumeCut'],
     ['shape', <IconWand key="w" />, 'shapeCut'],
-    ['puzzle', <IconGrid key="p" />, 'puzzle']
+    ['puzzle', <IconGrid key="p" />, 'puzzle'],
+    ['curved', <IconCurve key="cv" />, 'curvedCut']
   ]
 ]
 
@@ -128,6 +130,10 @@ export function App() {
   const [puzzlePins, setPuzzlePins] = useState(null) // [{planeIdx, u, v, off}]
   const [ctxMenu, setCtxMenu] = useState(null)
   const [busyMsg, setBusyMsg] = useState(null)
+  const [curvePoints, setCurvePoints] = useState([]) // [{ point: Vector3, dir: Vector3 }]
+  const curveRef = useRef([])
+  const curveDirRef = useRef(null)
+  const modelDiagRef = useRef(100)
 
   // Floating Cut HUD state
   const [cutHudMinimized, setCutHudMinimized] = useState(false)
@@ -344,6 +350,80 @@ export function App() {
     return box
   }, [s.pieces])
 
+  // Model scale reference for click-debounce and marker sizing.
+  useEffect(() => {
+    modelDiagRef.current = modelBox ? modelBox.getSize(new THREE.Vector3()).length() : 100
+  }, [modelBox])
+
+  // Live preview of the freehand cut line + cutting wall.
+  useEffect(() => {
+    if (activeTool !== 'curved') return
+    viewerRef.current?.setCurvePreview(
+      curvePoints.map((cp) => cp.point),
+      curveDirRef.current,
+      s.cutParams.kerf
+    )
+  }, [curvePoints, activeTool, s.cutParams.kerf])
+
+  // Backspace removes the last drawn point while the curved tool is active.
+  useEffect(() => {
+    if (activeTool !== 'curved') return
+    const onKey = (e) => {
+      if (e.key !== 'Backspace') return
+      const el = document.activeElement
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return
+      e.preventDefault()
+      curveRef.current = curveRef.current.slice(0, -1)
+      if (!curveRef.current.length) curveDirRef.current = null
+      setCurvePoints(curveRef.current)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [activeTool])
+
+  async function onCurveCut() {
+    if (curveRef.current.length < 2 || !curveDirRef.current) return
+    s.setBusy(true)
+    s.setError(null)
+    setBusyMsg(t('cutting'))
+    try {
+      const dir = curveDirRef.current
+      const targets = s.pieces.filter((p) => p.visible && !isDowelPiece(p))
+      let split = 0
+      for (const piece of targets) {
+        const parts = await curvedCutAsync(
+          piece.geometry,
+          curveRef.current.map((cp) => cp.point),
+          dir,
+          s.cutParams.kerf
+        )
+        if (parts.length < 2) continue
+        split++
+        useStore.getState().replacePiece(
+          piece.id,
+          parts.map((g, i) => ({
+            id: newPieceId(),
+            name: `${piece.name.replace(/\.[^.]+$/, '')}_${i + 1}`,
+            geometry: g,
+            visible: true
+          }))
+        )
+      }
+      if (!split) s.setError(t('curvedNoSplit'))
+      else {
+        curveRef.current = []
+        curveDirRef.current = null
+        setCurvePoints([])
+      }
+    } catch (e) {
+      console.error(e)
+      s.setError(t('cutError'))
+    } finally {
+      setBusyMsg(null)
+      s.setBusy(false)
+    }
+  }
+
   const currentAxisInfo = useMemo(() => {
     return AXIS_INFO.find((a) => a.id === s.cutPlaneAxis) || AXIS_INFO[1]
   }, [s.cutPlaneAxis])
@@ -430,6 +510,18 @@ export function App() {
 
     viewer.onShapePick = (faceIdx, pieceId, isBrushing) => {
       setShapeSeed({ faceIdx, pieceId, isBrushing: !!isBrushing })
+    }
+
+    viewer.onCurvePoint = (point, camDir) => {
+      if (useStore.getState().busy) return
+      // Ignore near-duplicate clicks (double click, jitter) — within 0.5% of
+      // the model diagonal they add nothing to the curve.
+      const diag = modelDiagRef.current
+      const last = curveRef.current[curveRef.current.length - 1]
+      if (last && last.point.distanceTo(point) < diag * 0.005) return
+      if (!curveRef.current.length) curveDirRef.current = camDir.clone()
+      curveRef.current = [...curveRef.current, { point, dir: camDir.clone() }]
+      setCurvePoints(curveRef.current)
     }
 
     viewer.onContextMenu = (x, y) => setCtxMenu({ x, y })
@@ -703,10 +795,17 @@ export function App() {
     viewerRef.current?.setFaceMode(activeTool === 'face')
     viewerRef.current?.setShapeMode(activeTool === 'shape')
     viewerRef.current?.showVolume(activeTool === 'volume')
+    viewerRef.current.curveMode = activeTool === 'curved'
     if (activeTool !== 'puzzle') clearPinPreview()
     if (activeTool !== 'shape') {
       clearShapeSel()
       setShapeSeed(null)
+    }
+    if (activeTool !== 'curved') {
+      curveRef.current = []
+      curveDirRef.current = null
+      setCurvePoints([])
+      viewerRef.current?.clearCurvePreview()
     }
   }, [activeTool])
 
@@ -1749,6 +1848,61 @@ export function App() {
               <section>
                 <h3>{t('modeMove')}</h3>
                 <div className="dims">{selectedId ? t('moveHint') : t('selectHint')}</div>
+              </section>
+            )}
+
+            {activeTool === 'curved' && (
+              <section>
+                <h3>{t('curvedCut')}</h3>
+                <div className="dims">{t('curvedHint')}</div>
+                <div className="dims">
+                  {t('curvedPoints', { n: curvePoints.length })}
+                  {curvePoints.length > 0 && (
+                    <>
+                      {' · '}
+                      <button
+                        className="link"
+                        disabled={s.busy || !curvePoints.length}
+                        onClick={() => {
+                          curveRef.current = curveRef.current.slice(0, -1)
+                          if (!curveRef.current.length) curveDirRef.current = null
+                          setCurvePoints(curveRef.current)
+                        }}
+                      >
+                        {t('curvedUndo')}
+                      </button>
+                      {' · '}
+                      <button
+                        className="link"
+                        disabled={s.busy || !curvePoints.length}
+                        onClick={() => {
+                          curveRef.current = []
+                          curveDirRef.current = null
+                          setCurvePoints([])
+                        }}
+                      >
+                        {t('curvedClear')}
+                      </button>
+                    </>
+                  )}
+                </div>
+                <label>
+                  {t('kerf')}
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.05"
+                    value={s.cutParams.kerf}
+                    onChange={(e) => s.setCutParams({ kerf: +e.target.value })}
+                  />
+                </label>
+                <button
+                  className="primary"
+                  disabled={s.busy || curvePoints.length < 2}
+                  onClick={onCurveCut}
+                >
+                  {s.busy ? t('cutting') : t('curvedExecute')}
+                </button>
               </section>
             )}
 

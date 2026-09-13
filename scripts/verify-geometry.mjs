@@ -4,7 +4,7 @@
 import * as THREE from 'three'
 import { STLLoader } from 'three/addons/loaders/STLLoader.js'
 import { readFileSync } from 'node:fs'
-import { planeCut, volumeCut, previewPins, simplifyGeometry } from '../src/geometry/manifoldOps.js'
+import { planeCut, volumeCut, previewPins, simplifyGeometry, curvedCut } from '../src/geometry/manifoldOps.js'
 
 let failures = 0
 function check(name, cond, detail = '') {
@@ -262,6 +262,74 @@ console.log('\n=== 11. Real model: Ratome mascot (organic, 80k tris, raw STL) ==
   check('ratome pieces watertight', parts.every(watertight))
   check('ratome sizes ≈ half each', Math.max(...parts.map(bboxSize).map((s) => s.z)) < size.z * 0.75,
     parts.map(bboxSize).map((s) => s.z.toFixed(1)).join(' / ') + ` of ${size.z.toFixed(1)}`)
+}
+
+
+console.log('\n=== 12. Freehand curved cut (knife-project style) ===')
+{
+  // Wavy line drawn on the FRONT hemisphere of a sphere, viewed from +Z.
+  const R = 40
+  const g = new THREE.SphereGeometry(R, 64, 48).toNonIndexed()
+  const pts = []
+  for (let i = 0; i <= 12; i++) {
+    const x = -R * 0.7 + (1.4 * R * i) / 12
+    const y = Math.sin((i / 12) * Math.PI * 2) * R * 0.25
+    const z = Math.sqrt(Math.max(1e-6, R * R - x * x - y * y))
+    pts.push(new THREE.Vector3(x, y, z))
+  }
+  const v0 = volume(g)
+  const parts = await curvedCut(g, pts, [0, 0, -1], { kerf: 0.15 })
+  check('curved cut splits sphere into 2 pieces', parts.length === 2, `${parts.length} pieces`)
+  check('curved pieces watertight', parts.every(watertight))
+  const vs = parts.reduce((a, p) => a + volume(p), 0)
+  check('curved volumes sum to original (minus kerf)', vs < v0 && vs > v0 * 0.97, `${vs.toFixed(0)} of ${v0.toFixed(0)}`)
+  // Self-crossing zigzag (freehand lines often cross themselves): the
+  // NonZero fill unions the slab and the cut must stay robust.
+  const zig = []
+  for (let i = 0; i <= 10; i++) {
+    const x = -R * 0.7 + (1.4 * R * i) / 10
+    const y = (i % 2 ? 1 : -1) * R * 0.3 * (1 - Math.abs(i / 10 - 0.5))
+    const z = Math.sqrt(Math.max(1e-6, R * R - x * x - y * y))
+    zig.push(new THREE.Vector3(x, y, z))
+  }
+  const zparts = await curvedCut(g, zig, [0, 0, -1], { kerf: 0.15 })
+  check('self-crossing zigzag still cuts cleanly',
+    zparts.length === 2 && zparts.every(watertight), `${zparts.length} pieces`)
+
+  // The real model: wavy line across the Ratome's middle (any 3D points
+  // whose view-plane projection is the desired curve work — the wall is
+  // built from the 2D projection).
+  {
+    const buf = readFileSync(new URL('../public/ratome.stl', import.meta.url).pathname)
+    const geo = new STLLoader().parse(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength))
+    geo.rotateX(-Math.PI / 2)
+    geo.computeBoundingBox()
+    const bb = geo.boundingBox
+    const cx = bb.getCenter(new THREE.Vector3())
+    const pts = []
+    for (let i = 0; i <= 14; i++) {
+      const t = i / 14
+      const x = bb.min.x + (bb.max.x - bb.min.x) * (0.1 + 0.8 * t)
+      const y = cx.y + Math.sin(t * Math.PI * 3) * bb.max.y * 0.06
+      pts.push(new THREE.Vector3(x, y, 0))
+    }
+    const t0 = Date.now()
+    const rparts = await curvedCut(geo, pts, [0, 0, 1], { kerf: 0.15 })
+    check('ratome curved cut into 2 pieces',
+      rparts.length === 2 && rparts.every(watertight),
+      `${rparts.length} pieces in ${((Date.now() - t0) / 1000).toFixed(1)}s`)
+  }
+
+  // Diagonal freehand line across a box front, viewed from +Z.
+  const box = new THREE.BoxGeometry(100, 60, 40).toNonIndexed()
+  const bx = [
+    new THREE.Vector3(-45, -25, 20.001),
+    new THREE.Vector3(0, 0, 20.001),
+    new THREE.Vector3(45, 25, 20.001)
+  ]
+  const bparts = await curvedCut(box, bx, [0, 0, -1], { kerf: 0.2 })
+  check('curved cut splits box into 2 pieces', bparts.length === 2, `${bparts.length} pieces`)
+  check('box pieces watertight', bparts.every(watertight))
 }
 
 console.log('\n' + (failures ? `${failures} FAILURE(S)` : 'ALL CHECKS PASSED'))
