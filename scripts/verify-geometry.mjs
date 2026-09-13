@@ -4,7 +4,9 @@
 import * as THREE from 'three'
 import { STLLoader } from 'three/addons/loaders/STLLoader.js'
 import { readFileSync } from 'node:fs'
-import { planeCut, volumeCut, previewPins, simplifyGeometry, curvedCut } from '../src/geometry/manifoldOps.js'
+import { planeCut, volumeCut, previewPins, simplifyGeometry, curvedCut, smartAnalyze } from '../src/geometry/manifoldOps.js'
+import Module from 'manifold-3d'
+import { AXIS_QUATS } from '../src/geometry/plane.js'
 
 let failures = 0
 function check(name, cond, detail = '') {
@@ -428,6 +430,65 @@ console.log('\n=== 12. Freehand curved cut (knife-project style) ===')
   const bparts = await curvedCut(box, bx, [0, 0, -1], { kerf: 0.2 })
   check('curved cut splits box into 2 pieces', bparts.length === 2, `${bparts.length} pieces`)
   check('box pieces watertight', bparts.every(watertight))
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 13: smart cut analysis finds the natural joints of a humanoid
+// ---------------------------------------------------------------------------
+{
+  const w = await Module()
+  w.setup()
+  const { Manifold } = w
+  const parts = [
+    Manifold.sphere(12, 48).translate([0, 88, 0]),
+    Manifold.cylinder(10, 4, 4, 24, true).translate([0, 76, 0]),
+    Manifold.cube([30, 44, 16], true).translate([0, 52, 0]),
+    Manifold.cylinder(34, 5, 5, 24, true).rotate(90, 0, 0).translate([17, 58, 0]),
+    Manifold.cylinder(34, 5, 5, 24, true).rotate(90, 0, 0).translate([-17, 58, 0]),
+    Manifold.cube([26, 12, 14], true).translate([0, 30, 0]),
+    Manifold.cylinder(28, 6.5, 6.5, 24, true).rotate(90, 0, 0).translate([7, 14, 0]),
+    Manifold.cylinder(28, 6.5, 6.5, 24, true).rotate(90, 0, 0).translate([-7, 14, 0])
+  ]
+  let m = parts[0]
+  for (let i = 1; i < parts.length; i++) m = m.add(parts[i])
+  const mesh = m.getMesh()
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.BufferAttribute(mesh.vertProperties.slice(), 3))
+  g.setIndex(new THREE.BufferAttribute(mesh.triVerts.slice(), 1))
+  m.delete()
+
+  const res = await smartAnalyze(g, 'y', 5)
+  check('smart analysis finds candidates', res.candidates.length >= 2, `${res.candidates.length} candidates`)
+  const neck = res.candidates.find((c) => c.label === 'neck' || (c.kind === 'narrow' && Math.abs(c.h - 76) < 8))
+  check('smart analysis finds the neck', !!neck && Math.abs(neck.h - 76) < 8, neck ? `h=${neck.h}` : 'none')
+  const crotch = res.candidates.find((c) => c.kind === 'split' && c.below === 2 && c.above === 1)
+  check(
+    'smart analysis finds the leg split',
+    !!crotch && Math.abs(crotch.h - 24) < 10,
+    crotch ? `h=${crotch.h}` : 'none'
+  )
+  // sanity: no candidate may sit in an empty region or outside the model
+  check(
+    'smart candidates all within the model',
+    res.candidates.every((c) => c.h > res.lo && c.h < res.hi && c.below >= 0 && c.above >= 0),
+    res.candidates.map((c) => c.h).join(', ')
+  )
+
+  // The proposed cuts must actually split the humanoid when applied.
+  if (neck && crotch) {
+    let pieces = [g]
+    for (const h of [crotch.h, neck.h]) {
+      const next = []
+      for (const piece of pieces) {
+        const parts2 = await planeCut(piece, { pos: [0, h, 0], quat: AXIS_QUATS.y }, { kerf: 0.15 })
+        if (parts2.length < 2) next.push(piece)
+        else next.push(...parts2)
+      }
+      pieces = next
+    }
+    check('smart cuts split the humanoid', pieces.length >= 3, `${pieces.length} pieces`)
+    check('smart-cut pieces watertight', pieces.every(watertight))
+  }
 }
 
 console.log('\n' + (failures ? `${failures} FAILURE(S)` : 'ALL CHECKS PASSED'))

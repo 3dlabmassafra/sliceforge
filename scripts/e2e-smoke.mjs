@@ -168,6 +168,44 @@ try {
   check('draft build applies enabled cuts only', nDraft === 2, `${nDraft} pieces`)
   check('draft mode exits after build', (await draftPanel.count()) === 0)
 
+  // --- reload, smart cut: analyze the model, plan, build ---
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(
+    () => document.querySelectorAll('.piece-item').length === 1,
+    null,
+    { timeout: 60000 }
+  )
+  await waitNotBusy()
+
+  await page.locator('.viewport-toolbar button[title="Taglio intelligente"]').click()
+  await page.locator('button.primary', { hasText: 'Analizza' }).click()
+  await page.waitForFunction(
+    () => document.querySelectorAll('.smart-entry').length >= 1,
+    null,
+    { timeout: 240000 }
+  )
+  await waitNotBusy(240000)
+  const nSmart = await page.locator('.smart-entry').count()
+  check('smart cut finds natural parting lines', nSmart >= 1, `${nSmart} candidates`)
+
+  await page.locator('button.primary', { hasText: 'tagli al piano' }).click()
+  await page.waitForFunction(
+    () => document.querySelectorAll('.draft-entry').length >= 1,
+    null,
+    { timeout: 30000 }
+  )
+  const nPlan = await page.locator('.draft-entry').count()
+  check('smart cuts land in the draft plan', nPlan === nSmart, `${nPlan} entries`)
+
+  await page.locator('.draft-panel button.primary').click()
+  await page.waitForFunction(
+    () => document.querySelectorAll('.piece-item').length >= 3,
+    null,
+    { timeout: 300000 }
+  )
+  await waitNotBusy(300000)
+  check('smart draft build splits the model', (await countPieces()) >= 3)
+
   // no runtime errors anywhere
   const errorBox = await page.locator('.error').count()
   check('no in-app error banner', errorBox === 0)

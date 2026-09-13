@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { planeCut, simplifyGeometry, volumeCut, previewPins, curvedCut } from './manifoldOps.js'
+import { planeCut, simplifyGeometry, volumeCut, previewPins, curvedCut, smartAnalyze } from './manifoldOps.js'
 
 function toGeometry({ positions, colors, index }) {
   const g = new THREE.BufferGeometry()
@@ -36,6 +36,11 @@ self.onmessage = async (e) => {
     else if (op === 'pinPreview') {
       const pins = await previewPins(g, params.planes, params)
       self.postMessage({ id, ok: true, plain: pins })
+      return
+    }
+    else if (op === 'smartAnalyze') {
+      const res = await smartAnalyze(g, params.axis, params.sensitivity)
+      self.postMessage({ id, ok: true, plain: res })
       return
     }
     else throw new Error(`unknown op ${op}`)

@@ -6,7 +6,7 @@ import { Viewer, PIECE_COLORS } from './three/viewer.js'
 import { importModelFile, ACCEPTED } from './io/importers.js'
 import { exportSTL, exportOBJ, exportGLB, export3MF } from './io/exporters.js'
 import { AXIS_QUATS, AXIS_INFO, planeBasis, computePlateTransform } from './geometry/plane.js'
-import { planeCutAsync, simplifyAsync, volumeCutAsync, pinPreviewAsync, curvedCutAsync } from './geometry/cutClient.js'
+import { planeCutAsync, simplifyAsync, volumeCutAsync, pinPreviewAsync, curvedCutAsync, smartAnalyzeAsync } from './geometry/cutClient.js'
 import {
   IconCut,
   IconCurve,
@@ -24,7 +24,8 @@ import {
   IconGrip,
   IconMinimize,
   IconMaximize,
-  IconDraft
+  IconDraft,
+  IconSpark
 } from './icons.jsx'
 import { CutPositionRuler } from './components/CutPositionRuler.jsx'
 import { growRegion, regionPositions, regionOrientedBox } from './geometry/shapeSelect.js'
@@ -81,7 +82,10 @@ function DimField({ label, color, value, onCommit }) {
 }
 
 const TOOL_GROUPS = [
-  [['plane', <IconCut key="c" />, 'planeCut']],
+  [
+    ['plane', <IconCut key="c" />, 'planeCut'],
+    ['smart', <IconSpark key="s" />, 'smartCut']
+  ],
   [
     ['move', <IconMove key="m" />, 'modeMove'],
     ['rotate', <IconRotate key="r" />, 'modeRotate'],
@@ -127,6 +131,11 @@ export function App() {
   const [plateGizmoMode, setPlateGizmoMode] = useState('rotate')
   const [pinPlacing, setPinPlacing] = useState(false)
   const [manualPins, setManualPins] = useState([])
+  const [smartAxis, setSmartAxis] = useState(null) // null = auto (longest model axis)
+  const [smartSens, setSmartSens] = useState(5)
+  const [smartPins, setSmartPins] = useState(() => useStore.getState().cutParams.pins)
+  const [smartResult, setSmartResult] = useState(null)
+  const [smartSel, setSmartSel] = useState(() => new Set())
   const [pinPreviewOn, setPinPreviewOn] = useState(false)
   const [puzzlePins, setPuzzlePins] = useState(null) // [{planeIdx, u, v, off}]
   const [ctxMenu, setCtxMenu] = useState(null)
@@ -336,6 +345,61 @@ export function App() {
     } finally {
       s.setBusy(false)
     }
+  }
+
+  // Smart cut: analyze cross-sections of every visible piece and collect
+  // the natural parting lines (neck, wrists, limb separations).
+  async function onSmartAnalyze() {
+    const targets = s.pieces.filter((p) => p.visible && !isDowelPiece(p))
+    if (!targets.length) return
+    s.setBusy(true)
+    s.setError(null)
+    setBusyMsg(t('smartAnalyzing'))
+    try {
+      const all = []
+      for (const piece of targets) {
+        const r = await smartAnalyzeAsync(piece.geometry, smartEffAxis, smartSens)
+        all.push(...r.candidates)
+      }
+      all.sort((a, b) => a.h - b.h)
+      // near-duplicate heights from separate pieces are one cut
+      const candidates = []
+      for (const c of all) {
+        const last = candidates[candidates.length - 1]
+        if (last && c.h - last.h < 4) continue
+        candidates.push(c)
+      }
+      setSmartResult({ axis: smartEffAxis, candidates })
+      setSmartSel(new Set(candidates.map((_, i) => i)))
+    } catch (e) {
+      console.error(e)
+      s.setError(t('cutError'))
+    } finally {
+      setBusyMsg(null)
+      s.setBusy(false)
+    }
+  }
+
+  // Turn the checked candidates into a non-destructive draft plan.
+  function onSmartAdd() {
+    if (!smartResult) return
+    const st = useStore.getState()
+    const picks = smartResult.candidates.filter((_, i) => smartSel.has(i))
+    if (!picks.length) return
+    if (!st.draftMode) st.setDraftMode(true)
+    const params = { ...st.cutParams, pins: smartPins }
+    const axis = smartResult.axis ?? 'y'
+    const pos = [0, 0, 0]
+    for (const c of picks) {
+      pos[axis === 'x' ? 0 : axis === 'y' ? 1 : 2] = c.h
+      st.addDraftCut({
+        kind: 'plane',
+        plane: { pos: [...pos], quat: [...AXIS_QUATS[axis]] },
+        params: { ...params },
+        label: t('smart_' + c.label) + ' · ' + Math.round(c.h) + ' mm'
+      })
+    }
+    setActiveTool(null)
   }
 
   // Apply every enabled draft cut, in order, to the pristine source pieces.
@@ -1141,6 +1205,10 @@ export function App() {
     const sz = selPiece.geometry.boundingBox.getSize(new THREE.Vector3())
     selDims = { x: sz.x, y: sz.y, z: sz.z }
   }
+
+  // Smart cut: default to the model's longest axis (a statue's up axis).
+  const smartEffAxis =
+    smartAxis ?? (dims ? ['x', 'y', 'z'].reduce((a, b) => (dims[b] > dims[a] ? b : a), 'x') : 'y')
 
   const effRadius = Math.min(shapeRadius, Math.ceil(maxDim))
 
@@ -1958,6 +2026,81 @@ export function App() {
               </section>
             )}
 
+            {activeTool === 'smart' && s.pieces.length > 0 && (
+              <section>
+                <h3>{t('smartCut')}</h3>
+                <div className="dims">{t('smartHint')}</div>
+                <div className="axis-row">
+                  {AXIS_INFO.map((a) => (
+                    <button
+                      key={a.id}
+                      className={smartEffAxis === a.id ? 'active' : ''}
+                      onClick={() => {
+                        setSmartAxis(a.id)
+                        setSmartResult(null)
+                      }}
+                      title={smartAxis === null ? t('smartAuto') : undefined}
+                    >
+                      {a.label}
+                    </button>
+                  ))}
+                  {smartAxis === null && <span className="dims">· {t('smartAuto')}</span>}
+                </div>
+                <label>
+                  {t('smartSens')}
+                  <input
+                    type="range"
+                    min="1"
+                    max="10"
+                    value={smartSens}
+                    onChange={(e) => setSmartSens(+e.target.value)}
+                  />
+                  <span className="dims">{smartSens}</span>
+                </label>
+                <label className="inline">
+                  <input
+                    type="checkbox"
+                    checked={smartPins}
+                    onChange={(e) => setSmartPins(e.target.checked)}
+                  />
+                  {t('connectors')}
+                </label>
+                <button className="primary" disabled={s.busy} onClick={onSmartAnalyze}>
+                  {s.busy && busyMsg === t('smartAnalyzing') ? t('smartAnalyzing') : t('smartAnalyze')}
+                </button>
+                {smartResult && smartResult.candidates.length === 0 && (
+                  <div className="dims">{t('smartNoCuts')}</div>
+                )}
+                {smartResult?.candidates.map((c, i) => (
+                  <div key={i} className="simplify-row draft-entry smart-entry">
+                    <label className="inline" style={{ flex: 1, minWidth: 0 }}>
+                      <input
+                        type="checkbox"
+                        checked={smartSel.has(i)}
+                        onChange={() =>
+                          setSmartSel((sel) => {
+                            const next = new Set(sel)
+                            if (next.has(i)) next.delete(i)
+                            else next.add(i)
+                            return next
+                          })
+                        }
+                      />
+                      <span className="dims" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {Math.round(c.h)} mm · {t('smart_' + c.label)}
+                        {c.kind === 'split' ? ` (${c.below}→${c.above})` : ''}
+                      </span>
+                    </label>
+                  </div>
+                ))}
+                {smartResult?.candidates.length > 0 && (
+                  <button className="primary" onClick={onSmartAdd} disabled={!smartSel.size}>
+                    {t('smartAdd', { n: smartSel.size })}
+                  </button>
+                )}
+              </section>
+            )}
+
             {s.draftMode && (
               <section className="draft-panel">
                 <h3>
@@ -1978,9 +2121,10 @@ export function App() {
                       />
                       <span className="dims" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {i + 1}.{' '}
-                        {cut.kind === 'plane'
-                          ? t('draftEntryPlane', { axis: (AXIS_INFO.find((a) => a.quat.join() === cut.plane.quat.join())?.label ?? '·') })
-                          : t('draftEntryCurved', { n: cut.points.length })}
+                        {cut.label ??
+                          (cut.kind === 'plane'
+                            ? t('draftEntryPlane', { axis: (AXIS_INFO.find((a) => a.quat.join() === cut.plane.quat.join())?.label ?? '·') })
+                            : t('draftEntryCurved', { n: cut.points.length }))}
                       </span>
                     </label>
                     <button className="link" onClick={() => s.removeDraftCut(cut.id)}>

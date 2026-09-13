@@ -150,3 +150,10 @@ export const IconMaximize = () => (
     <rect x="4" y="4" width="16" height="16" rx="2" />
   </svg>
 )
+
+export const IconSpark = () => (
+  <svg {...base}>
+    <path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9z" />
+    <path d="M18.5 14.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z" />
+  </svg>
+)

@@ -61,6 +61,20 @@ export const simplifyAsync = (geometry, ratio) => runOp('simplify', geometry, { 
 
 export const volumeCutAsync = (geometry, matrix) => runOp('volumeCut', geometry, { params: { matrix } })
 
+// Plain-data op: smart cut candidate analysis (no geometry comes back).
+export async function smartAnalyzeAsync(geometry, axis, sensitivity) {
+  const id = ++seq
+  const positions = new Float32Array(geometry.attributes.position.array)
+  const index = geometry.index ? new Uint32Array(geometry.index.array) : null
+  const promise = new Promise((resolve, reject) => pending.set(id, { resolve, reject }))
+  getWorker().postMessage(
+    { id, op: 'smartAnalyze', positions, index, params: { axis, sensitivity } },
+    [positions.buffer, index?.buffer].filter(Boolean)
+  )
+  const res = await promise
+  return res.plain ?? { axis, lo: 0, hi: 0, candidates: [] }
+}
+
 export const curvedCutAsync = (geometry, points, viewDir, params) =>
   runOp('curvedCut', geometry, {
     params: {

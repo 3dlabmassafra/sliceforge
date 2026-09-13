@@ -672,6 +672,128 @@ function pinPlacements(wasm, solid, params) {
  * Runs the exact same placement logic as the cut, against the given
  * geometry, and returns world-space poses for the orange ghost markers.
  */
+/**
+ * Smart cut analysis: find the natural parting lines of a model (statues,
+ * figurines) by reading its cross-sections along one axis.
+ *
+ * Two signals mark a good cut:
+ *  - NARROW JOINTS: a local minimum of cross-section area (neck, wrists,
+ *    ankles) — cutting there hides the seam and each part stays strong;
+ *  - LIMB SEPARATIONS: the number of cross-section components changes and
+ *    stays stable on both sides (crotch: 2 legs -> 1 torso, armpits:
+ *    1 torso -> torso + 2 free arms).
+ *
+ * Returns candidates in world coordinates along the chosen axis, each with
+ * the counts that let the UI label it (neck / legs / arms / joint).
+ */
+export async function smartAnalyze(geometry, axis = 'y', sensitivity = 5) {
+  const wasm = await getWasm()
+  // Bring the analysis axis onto +Z (slice() cuts on the local XY plane).
+  const AXQ = {
+    x: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2),
+    y: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2),
+    z: new THREE.Quaternion()
+  }
+  const gLocal = geometry.clone().applyMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(AXQ[axis] ?? AXQ.y))
+  const solid = geometryToManifold(wasm, gLocal)
+  gLocal.dispose()
+  const bb = solid.boundingBox()
+  const lo = bb.min[2]
+  const hi = bb.max[2]
+  const H = hi - lo
+  const out = { axis, lo, hi, candidates: [] }
+  if (!(H >= 8)) {
+    solid.delete()
+    return out
+  }
+
+  // ~1 slice per mm, capped so huge models stay interactive.
+  const N = Math.min(220, Math.max(60, Math.round(H)))
+  const step = H / N
+  const areas = new Float64Array(N)
+  const comps = new Int32Array(N)
+  for (let i = 0; i < N; i++) {
+    const h = lo + (i + 0.5) * step
+    const sec = solid.slice(h)
+    const polys = sec.toPolygons()
+    sec.delete()
+    let a = 0
+    let c = 0
+    for (const p of polys) {
+      const pa = polygonArea(p)
+      a += pa
+      if (pa > 0) c++
+    }
+    areas[i] = Math.abs(a)
+    comps[i] = c
+  }
+  solid.delete()
+
+  const w = Math.max(3, Math.round(N * 0.05))
+  const thr = 0.8 - sensitivity * 0.05
+  const raw = []
+
+  // (a) narrow joints — local minima much thinner than their surroundings
+  for (let i = w; i < N - w; i++) {
+    if (comps[i] === 0) continue // empty slice is not a joint
+    let isMin = true
+    let nb = 0
+    for (let j = i - w; j <= i + w; j++) {
+      if (j !== i && areas[j] < areas[i]) {
+        isMin = false
+        break
+      }
+      if (areas[j] > nb) nb = areas[j]
+    }
+    if (isMin && areas[i] < nb * thr)
+      raw.push({ h: lo + (i + 0.5) * step, kind: 'narrow', ratio: +(areas[i] / nb).toFixed(3), below: comps[i], above: comps[i] })
+  }
+
+  // (b) stable component transitions — the change must hold on both sides
+  const k = Math.max(2, Math.round(w / 2))
+  for (let i = 0; i < N - 1; i++) {
+    const b = comps[i]
+    const a = comps[i + 1]
+    if (b === a || b === 0 || a === 0) continue
+    let stable = true
+    for (let j = Math.max(0, i - k + 1); j <= i && stable; j++) if (comps[j] !== b) stable = false
+    for (let j = i + 1; j <= Math.min(N - 1, i + k) && stable; j++) if (comps[j] !== a) stable = false
+    if (stable) raw.push({ h: lo + (i + 1) * step, kind: 'split', ratio: 1, below: b, above: a })
+  }
+
+  raw.sort((p, q) => p.h - q.h)
+  // Merge near-duplicates; a narrow joint wins as the cut line (cleaner
+  // seam) but keeps the component counts of the split it absorbs.
+  const minSep = Math.max(6, H * (0.1 - sensitivity * 0.005))
+  const merged = []
+  for (const c of raw) {
+    const last = merged[merged.length - 1]
+    if (last && c.h - last.h < minSep) {
+      if (c.kind === 'narrow' && last.kind !== 'narrow') merged[merged.length - 1] = { ...c, below: last.below, above: last.above }
+      else if (c.kind === 'narrow' && last.kind === 'narrow' && c.ratio < last.ratio) merged[merged.length - 1] = c
+      continue
+    }
+    merged.push(c)
+  }
+
+  const trimmed = merged.filter((c) => c.h - lo > H * 0.04 && hi - c.h > H * 0.04)
+  const narrows = trimmed.filter((c) => c.kind === 'narrow')
+  const topNarrow = narrows.length ? narrows[narrows.length - 1] : null
+  out.candidates = trimmed.map((c) => {
+    const relH = (c.h - lo) / H
+    const label =
+      c === topNarrow
+        ? 'neck'
+        : c.kind !== 'split'
+          ? 'joint'
+          : c.below > c.above
+            ? relH < 0.55 ? 'legs' : 'split'
+            : relH >= 0.45 ? 'arms' : 'split'
+    return { ...c, h: Math.round(c.h * 100) / 100, label }
+  })
+  return out
+}
+
 export async function previewPins(geometry, planes, params) {
   const wasm = await getWasm()
   const out = []
