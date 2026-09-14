@@ -206,6 +206,84 @@ try {
   await waitNotBusy(300000)
   check('smart draft build splits the model', (await countPieces()) >= 3)
 
+  // --- reload, shape brush: paint-on-drag, sticky selection, Alt orbit ---
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(
+    () => document.querySelectorAll('.piece-item').length === 1,
+    null,
+    { timeout: 60000 }
+  )
+  await waitNotBusy()
+
+  await page.locator('.viewport-toolbar button[title="Taglio per Forma"]').click()
+  const cnv = page.locator('canvas')
+  const cb = await cnv.boundingBox()
+  const selCount = async () => {
+    const txt = await page
+      .locator('.dims', { hasText: 'triangoli selezionati' })
+      .first()
+      .textContent()
+      .catch(() => '')
+    return parseInt(txt.replace(/\D+/g, ''), 10) || 0
+  }
+
+  // 1. just MOVING over the model must not paint anything
+  for (let i = 0; i < 6; i++) {
+    await page.mouse.move(
+      cb.x + cb.width * (0.45 + 0.02 * i),
+      cb.y + cb.height * (0.45 + 0.015 * i)
+    )
+    await page.waitForTimeout(60)
+  }
+  check('shape: hover does not paint', (await selCount()) === 0)
+
+  // 2. dragging over the model paints, and the selection survives release
+  await page.mouse.move(cb.x + cb.width * 0.5, cb.y + cb.height * 0.45)
+  await page.mouse.down()
+  for (let i = 0; i < 6; i++) {
+    await page.mouse.move(
+      cb.x + cb.width * (0.46 + 0.018 * i),
+      cb.y + cb.height * (0.46 + 0.015 * i),
+      { steps: 2 }
+    )
+    await page.waitForTimeout(80)
+  }
+  await page.mouse.up()
+  await page.waitForTimeout(300)
+  const painted = await selCount()
+  check('shape: drag paints a selection', painted > 0, `${painted} triangles`)
+  check('shape: selection stays after release', (await selCount()) === painted)
+
+  // 3. Alt+drag orbits without adding anything
+  await page.keyboard.down('Alt')
+  await page.mouse.move(cb.x + cb.width * 0.5, cb.y + cb.height * 0.5)
+  await page.mouse.down()
+  for (let i = 0; i < 5; i++) {
+    await page.mouse.move(cb.x + cb.width * (0.4 + 0.04 * i), cb.y + cb.height * 0.5, { steps: 2 })
+    await page.waitForTimeout(60)
+  }
+  await page.mouse.up()
+  await page.keyboard.up('Alt')
+  await page.waitForTimeout(300)
+  check('shape: Alt-drag does not paint', (await selCount()) === painted)
+
+  // 4. subtract mode erases from the selection
+  await page.locator('button', { hasText: '− Sottrai' }).click()
+  await page.mouse.move(cb.x + cb.width * 0.5, cb.y + cb.height * 0.48)
+  await page.mouse.down()
+  for (let i = 0; i < 4; i++) {
+    await page.mouse.move(
+      cb.x + cb.width * (0.47 + 0.02 * i),
+      cb.y + cb.height * (0.47 + 0.015 * i),
+      { steps: 2 }
+    )
+    await page.waitForTimeout(80)
+  }
+  await page.mouse.up()
+  await page.waitForTimeout(300)
+  const afterSub = await selCount()
+  check('shape: subtract erases the over-paint', afterSub < painted, `${painted} -> ${afterSub}`)
+
   // no runtime errors anywhere
   const errorBox = await page.locator('.error').count()
   check('no in-app error banner', errorBox === 0)

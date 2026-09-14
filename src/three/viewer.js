@@ -131,7 +131,58 @@ export class Viewer {
     this._raycaster = new THREE.Raycaster()
     this._downPos = null
     this._isBrushing = false
+    this._shapeStroke = false
     this.onCurvePoint = null
+    // Shape brush: capture phase so the decision is made BEFORE
+    // OrbitControls' own pointerdown — paint only on a left press that hits
+    // the model, Alt+drag (or dragging the void) stays a camera orbit.
+    this._endShapeStroke = () => {
+      if (this._shapeStroke) {
+        this._shapeStroke = false
+        this.controls.enabled = true
+        canvas.style.cursor = ''
+      }
+    }
+    window.addEventListener('pointerup', this._endShapeStroke)
+    canvas.addEventListener(
+      'pointerdown',
+      (e) => {
+        if (!this.shapeMode || e.button !== 0) return
+        if (e.altKey) {
+          // Hold Alt to rotate/paint-proof: pure camera orbit.
+          this._shapeStroke = false
+          this.controls.enabled = true
+          return
+        }
+        const rect = canvas.getBoundingClientRect()
+        if (!rect.width || !rect.height) return
+        this._raycaster.setFromCamera(
+          new THREE.Vector2(
+            ((e.clientX - rect.left) / rect.width) * 2 - 1,
+            -((e.clientY - rect.top) / rect.height) * 2 + 1
+          ),
+          this.camera
+        )
+        const hit = this._raycaster.intersectObjects(
+          this.piecesGroup.children.filter((m) => m.visible),
+          false
+        )[0]
+        if (hit?.face) {
+          this._shapeStroke = true
+          this.controls.enabled = false
+          canvas.style.cursor = 'crosshair'
+          try {
+            canvas.setPointerCapture(e.pointerId)
+          } catch {}
+          this.onShapePick?.(hit.faceIndex, hit.object.userData.pieceId, false, e.ctrlKey)
+        } else {
+          // Pressing the void: free orbit, nothing paints.
+          this._shapeStroke = false
+          this.controls.enabled = true
+        }
+      },
+      true
+    )
     canvas.addEventListener('pointerdown', (e) => {
       if (e.button === 2) {
         this._rDownPos = [e.clientX, e.clientY]
@@ -167,10 +218,20 @@ export class Viewer {
           ),
           this.camera
         )
-      if (this._isBrushing) {
+      if (this._shapeStroke) {
           setRay()
           const hit = this._raycaster.intersectObjects(this.piecesGroup.children.filter((m) => m.visible), false)[0]
-          if (hit?.face) this.onShapePick?.(hit.faceIndex, hit.object.userData.pieceId, true)
+          if (hit?.face) this.onShapePick?.(hit.faceIndex, hit.object.userData.pieceId, true, e.ctrlKey)
+          return
+        }
+        if (this.shapeMode) {
+          // Brush hover affordance: crosshair over the model, plain outside.
+          setRay()
+          const hit = this._raycaster.intersectObjects(
+            this.piecesGroup.children.filter((m) => m.visible),
+            false
+          )[0]
+          canvas.style.cursor = hit ? 'crosshair' : ''
           return
         }
         if (this._dragPin) {
@@ -344,13 +405,8 @@ export class Viewer {
           false
         )
         const hit = hits[0]
+        if (this.shapeMode) return // brush strokes are pointerdown-driven
         if (!hit?.face) {
-          // Clicking the void while painting ends the brush stroke (the
-          // selection stays) and gives the orbit controls back.
-          if (this.shapeMode && this._isBrushing) {
-            this._isBrushing = false
-            this.controls.enabled = true
-          }
           return
         }
         if (this.curveMode) {
@@ -359,13 +415,6 @@ export class Viewer {
           // App on the first point).
           const dir = this.camera.getWorldDirection(new THREE.Vector3())
           this.onCurvePoint?.(hit.point.clone(), dir)
-        } else if (this.shapeMode) {
-          // Seed click: start/replace the selection AND enter paint mode —
-          // from here the cursor brushes (accumulates) until the user
-          // clicks the void or leaves the tool.
-          this._isBrushing = true
-          this.controls.enabled = false
-          this.onShapePick?.(hit.faceIndex, hit.object.userData.pieceId, false)
         } else if (this.planeMode)
           this.onPlanePick?.(hit.point.clone(), hit.face.normal.clone())
         else this.onFacePick?.(hit.face.normal.clone(), hit.object.userData.pieceId)
@@ -486,7 +535,7 @@ export class Viewer {
   }
 
 
-  setShapeHighlight(positions) {
+  setShapeHighlight(positions, subtract) {
     if (this._shapeMesh) {
       this.scene.remove(this._shapeMesh)
       this._shapeMesh.geometry.dispose()
@@ -498,9 +547,9 @@ export class Viewer {
     g.setAttribute('position', new THREE.BufferAttribute(positions, 3))
     this._shapeMesh = new THREE.Mesh(
       g,
-      // Orange, near-opaque: must read clearly on top of the blue pieces.
+      // Orange = adding to the selection, red = erasing from it.
       new THREE.MeshBasicMaterial({
-        color: 0xffb347,
+        color: subtract ? 0xff4d4d : 0xffb347,
         transparent: true,
         opacity: 0.85,
         polygonOffset: true,
@@ -1302,8 +1351,7 @@ export class Viewer {
       setTimeout(() => this.warmFaceCaches(), 30)
     } else {
       // Leaving the tool always ends a brush stroke and frees the controls.
-      this._isBrushing = false
-      this.controls.enabled = true
+      this._endShapeStroke?.()
     }
   }
 
@@ -1325,6 +1373,7 @@ export class Viewer {
     cancelAnimationFrame(this._raf)
     if (this._contourRaf) cancelAnimationFrame(this._contourRaf)
     window.removeEventListener('resize', this._onResize)
+    if (this._endShapeStroke) window.removeEventListener('pointerup', this._endShapeStroke)
     this.renderer.dispose()
   }
 }

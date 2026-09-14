@@ -188,6 +188,7 @@ export function App() {
   const [shapeSens, setShapeSens] = useState(40)
   const [shapeRadius, setShapeRadius] = useState(25)
   const [shapeSeed, setShapeSeed] = useState(null)
+  const [shapeSub, setShapeSub] = useState(false) // false = add brush, true = subtract
   const [shapeMeta, setShapeMeta] = useState(null)
   const shapeSelRef = useRef(null)
 
@@ -197,12 +198,37 @@ export function App() {
     viewerRef.current?.setShapeHighlight(null)
   }
 
-  function runShapeSelection(pieceId, faceIndex, sens, radius, isBrushing) {
+  function runShapeSelection(pieceId, faceIndex, sens, radius, isBrushing, subtract) {
     const piece = useStore.getState().pieces.find((p) => p.id === pieceId)
     if (!piece) return
     const res = growRegion(piece.geometry, faceIndex, sens, radius)
+    const cur = shapeSelRef.current
 
-    if (!isBrushing) {
+    if (subtract) {
+      // Eraser: carve the freshly grown region out of the selection. With
+      // nothing selected (or another piece selected) there is nothing to
+      // erase — the stroke is simply a no-op.
+      if (!cur || cur.pieceId !== pieceId || !cur.sel) return
+      let newCount = cur.count
+      for (let i = 0; i < res.sel.length; i++) {
+        if (res.sel[i] && cur.sel[i]) {
+          cur.sel[i] = 0
+          newCount--
+        }
+      }
+      cur.count = newCount
+      useStore.getState().setError(null)
+      setShapeMeta({ pieceId, count: newCount })
+      viewerRef.current?.setShapeHighlight(
+        regionPositions(piece.geometry, cur.sel, cur.count),
+        true
+      )
+      return
+    }
+
+    if (!isBrushing && (!cur || cur.pieceId !== pieceId)) {
+      // First dab of a stroke on this piece: the whole-model guard only
+      // applies when starting a selection from scratch.
       if (res.count >= res.triCount * 0.95) {
         shapeSelRef.current = { pieceId, sel: null, count: res.count }
         setShapeMeta(null)
@@ -211,21 +237,19 @@ export function App() {
         return
       }
       shapeSelRef.current = { pieceId, sel: res.sel, count: res.count }
+    } else if (!cur || cur.pieceId !== pieceId || !cur.sel) {
+      shapeSelRef.current = { pieceId, sel: res.sel, count: res.count }
     } else {
       // Brushing: union the freshly grown region into the current selection.
-      if (!shapeSelRef.current || shapeSelRef.current.pieceId !== pieceId || !shapeSelRef.current.sel) {
-        shapeSelRef.current = { pieceId, sel: res.sel, count: res.count }
-      } else {
-        const curSel = shapeSelRef.current.sel
-        let newCount = shapeSelRef.current.count
-        for (let i = 0; i < res.sel.length; i++) {
-          if (res.sel[i] && !curSel[i]) {
-            curSel[i] = 1
-            newCount++
-          }
+      const curSel = cur.sel
+      let newCount = cur.count
+      for (let i = 0; i < res.sel.length; i++) {
+        if (res.sel[i] && !curSel[i]) {
+          curSel[i] = 1
+          newCount++
         }
-        shapeSelRef.current.count = newCount
       }
+      cur.count = newCount
     }
     useStore.getState().setError(null)
     setShapeMeta({ pieceId, count: shapeSelRef.current.count })
@@ -639,8 +663,8 @@ export function App() {
       })
     }
 
-    viewer.onShapePick = (faceIdx, pieceId, isBrushing) => {
-      setShapeSeed({ faceIdx, pieceId, isBrushing: !!isBrushing })
+    viewer.onShapePick = (faceIdx, pieceId, isBrushing, ctrl) => {
+      setShapeSeed({ faceIdx, pieceId, isBrushing: !!isBrushing, ctrl: !!ctrl })
     }
 
     viewer.onCurvePoint = (point, camDir) => {
@@ -1212,11 +1236,19 @@ export function App() {
 
   const effRadius = Math.min(shapeRadius, Math.ceil(maxDim))
 
-  // shape tool live selection (must run after effRadius is declared)
+  // shape tool live selection (must run after effRadius is declared).
+  // Ctrl inverts the current brush mode (add <-> subtract) for one stroke.
   useEffect(() => {
     if (!shapeSeed) return
-    runShapeSelection(shapeSeed.pieceId, shapeSeed.faceIdx, shapeSens, effRadius, shapeSeed.isBrushing)
-  }, [shapeSeed, shapeSens, effRadius])
+    runShapeSelection(
+      shapeSeed.pieceId,
+      shapeSeed.faceIdx,
+      shapeSens,
+      effRadius,
+      shapeSeed.isBrushing,
+      shapeSub !== shapeSeed.ctrl
+    )
+  }, [shapeSeed, shapeSens, effRadius, shapeSub])
 
   async function onDetachShape() {
     const sh = shapeSelRef.current
@@ -2346,6 +2378,18 @@ export function App() {
                 <div className="dims">
                   {shapeMeta ? t('shapeSelected', { n: shapeMeta.count }) : t('shapeHint')}
                 </div>
+                <div className="axis-row">
+                  <button className={!shapeSub ? 'active' : ''} onClick={() => setShapeSub(false)}>
+                    ＋ {t('brushAdd')}
+                  </button>
+                  <button className={shapeSub ? 'active' : ''} onClick={() => setShapeSub(true)}>
+                    − {t('brushSub')}
+                  </button>
+                </div>
+                <div className="dims">{t('shapeBrushHint')}</div>
+                {shapeMeta && (
+                  <button onClick={() => clearShapeSel()}>{t('shapeClear')}</button>
+                )}
                 <label>
                   {t('radius')} ({effRadius} mm)
                   <input

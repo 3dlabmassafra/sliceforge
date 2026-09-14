@@ -1,5 +1,9 @@
 const dict = {
   it: {
+      'brushAdd': 'Aggiungi',
+      'brushSub': 'Sottrai',
+      'shapeClear': 'Deseleziona tutto',
+      'shapeBrushHint': 'Trascina = pennello · Ctrl = inverte aggiungi/sottrai · Alt+trascina = ruota la vista senza pitturare',
       'smartAuto': 'auto',
       'smartCut': 'Taglio intelligente',
       'smartHint': 'Analizza le sezioni del modello e propone i tagli nei punti naturali: collo, polsi, separazione di braccia e gambe.',
@@ -105,7 +109,7 @@ const dict = {
     shapeCut: 'Taglio per Forma',
     sensitivity: 'Sensibilità bordi',
     radius: 'Raggio selezione',
-    shapeHint: 'Clicca un dettaglio sporgente del modello, poi muovi il cursore sopra per estendere la selezione (pennello). Clicca lo sfondo per tornare a ruotare la vista.',
+    shapeHint: 'Trascina sul modello per dipingere la selezione; le varie aree si sommano. La selezione resta fissa finché non tagli o deselezioni.',
     shapeSelected: '{{n}} triangoli selezionati',
     detachShape: 'Separa forma',
     shapeWhole: 'La selezione copre l’intero modello — riduci la sensibilità o seleziona un dettaglio più marcato.',
@@ -142,6 +146,10 @@ const dict = {
     scaleToMm: 'Converti in mm (×1000)'
   },
   en: {
+      'brushAdd': 'Add',
+      'brushSub': 'Subtract',
+      'shapeClear': 'Clear selection',
+      'shapeBrushHint': 'Drag = brush · Ctrl = toggles add/subtract · Alt+drag = orbit the view without painting',
       'smartAuto': 'auto',
       'smartCut': 'Smart cut',
       'smartHint': 'Analyzes the model cross-sections and proposes cuts at natural parting lines: neck, wrists, arm and leg separations.',
@@ -247,7 +255,7 @@ const dict = {
     shapeCut: 'Shape cut',
     sensitivity: 'Crease sensitivity',
     radius: 'Selection radius',
-    shapeHint: 'Click a protruding detail, then move the cursor over the model to extend the selection (brush). Click the background to orbit again.',
+    shapeHint: 'Drag over the model to paint the selection; areas accumulate. The selection stays fixed until you cut or clear it.',
     shapeSelected: '{{n}} triangles selected',
     detachShape: 'Detach the shape',
     shapeWhole: 'The selection covers the whole model — lower the sensitivity or pick a more marked detail.',
@@ -284,6 +292,10 @@ const dict = {
     scaleToMm: 'Convert to mm (×1000)'
   },
   pt: {
+      'brushAdd': 'Adicionar',
+      'brushSub': 'Subtrair',
+      'shapeClear': 'Limpar seleção',
+      'shapeBrushHint': 'Arrastar = pincel · Ctrl = alterna adicionar/subtrair · Alt+arrastar = orbitar sem pintar',
       'smartAuto': 'auto',
       'smartCut': 'Corte inteligente',
       'smartHint': 'Analisa as seções do modelo e propõe cortes nas linhas naturais: pescoço, pulsos, separação de braços e pernas.',
@@ -387,7 +399,7 @@ const dict = {
     shapeCut: 'Corte por Forma',
     sensitivity: 'Sensibilidade',
     radius: 'Raio de seleção',
-    shapeHint: 'Clique num detalhe saliente e mova o cursor sobre o modelo para estender a seleção (pincel). Clique no fundo para voltar a orbitar.',
+    shapeHint: 'Arraste sobre o modelo para pintar a seleção; as áreas acumulam. A seleção fica fixa até cortar ou limpar.',
     shapeSelected: '{{n}} triângulos selecionados',
     detachShape: 'Destacar forma',
     shapeWhole: 'A seleção cobre todo o modelo.',
@@ -424,6 +436,10 @@ const dict = {
     scaleToMm: 'Converter para mm (×1000)'
   },
   fr: {
+      'brushAdd': 'Ajouter',
+      'brushSub': 'Soustraire',
+      'shapeClear': 'Tout désélectionner',
+      'shapeBrushHint': 'Glisser = pinceau · Ctrl = bascule ajouter/soustraire · Alt+glisser = orbiter sans peindre',
       'smartAuto': 'auto',
       'smartCut': 'Coupe intelligente',
       'smartHint': 'Analyse les sections du modèle et propose des coupes aux lignes naturelles : cou, poignets, séparation des bras et des jambes.',
@@ -529,7 +545,7 @@ const dict = {
     shapeCut: 'Coupe par forme',
     sensitivity: 'Sensibilité aux arêtes',
     radius: 'Rayon de sélection',
-    shapeHint: 'Clique un détail saillant, puis déplace le curseur sur le modèle pour étendre la sélection (pinceau). Clique le fond pour remettre l\'orbite.',
+    shapeHint: 'Faites glisser sur le modèle pour peindre la sélection ; les zones s\'accumulent. La sélection reste fixe jusqu\'à la coupe ou l\'effacement.',
     shapeSelected: '{{n}} triangles sélectionnés',
     detachShape: 'Détacher la forme',
     shapeWhole: 'La sélection couvre tout le modèle — baisse la sensibilité ou vise un détail plus marqué.',
