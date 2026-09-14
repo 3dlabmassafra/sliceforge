@@ -1,5 +1,8 @@
 const dict = {
   it: {
+      'detachEdge': 'Stacca lungo il bordo',
+      'detachEdgeHint': 'Taglia esattamente lungo il bordo della selezione, perpendicolare alla superficie (kerf attuale): capelli, mani, polsi, dettagli. «Separa forma» usa invece una scatola.',
+      'edgeNoSplit': 'Il taglio lungo il bordo non ha separato il pezzo: prova a selezionare un\'area pi\u00f9 netta.',
       'splitParts': 'Separa in pezzi',
       'splitNone': 'Nessun pezzo separabile: il modello è già un corpo unico.',
       'splitHint': 'Separa i corpi disconnessi del file in pezzi separati.',
@@ -149,6 +152,9 @@ const dict = {
     scaleToMm: 'Converti in mm (×1000)'
   },
   en: {
+      'detachEdge': 'Detach along the boundary',
+      'detachEdgeHint': 'Cuts exactly along the selection boundary, perpendicular to the surface (current kerf): hair, hands, wrists, details. \u201cDetach the shape\u201d uses a box instead.',
+      'edgeNoSplit': 'The boundary cut did not separate the piece: try a cleaner selection area.',
       'splitParts': 'Split into parts',
       'splitNone': 'Nothing to separate: the model is already a single body.',
       'splitHint': 'Separates the file\'s disconnected bodies into individual pieces.',
@@ -298,6 +304,9 @@ const dict = {
     scaleToMm: 'Convert to mm (×1000)'
   },
   pt: {
+      'detachEdge': 'Destacar ao longo da borda',
+      'detachEdgeHint': 'Corta exatamente ao longo da borda da sele\u00e7\u00e3o, perpendicular \u00e0 superf\u00edcie (kerf atual): cabelo, m\u00e3os, pulsos, detalhes. \u201cSepara forma\u201d usa uma caixa.',
+      'edgeNoSplit': 'O corte na borda n\u00e3o separou a pe\u00e7a: tente uma \u00e1rea de sele\u00e7\u00e3o mais n\u00edtida.',
       'splitParts': 'Separar em peças',
       'splitNone': 'Nada a separar: o modelo já é um corpo único.',
       'splitHint': 'Separa os corpos desconectados do ficheiro em peças individuais.',
@@ -445,6 +454,9 @@ const dict = {
     scaleToMm: 'Converter para mm (×1000)'
   },
   fr: {
+      'detachEdge': 'D\u00e9tacher le long du bord',
+      'detachEdgeHint': 'Coupe exactement le long du bord de la s\u00e9lection, perpendiculaire \u00e0 la surface (kerf actuel) : cheveux, mains, poignets, d\u00e9tails. \u00ab Separa forma \u00bb utilise une bo\u00eete.',
+      'edgeNoSplit': 'La coupe au bord n\u2019a pas s\u00e9par\u00e9 la pi\u00e8ce : essayez une zone de s\u00e9lection plus nette.',
       'splitParts': 'Séparer en pièces',
       'splitNone': 'Rien à séparer : le modèle est déjà un corps unique.',
       'splitHint': 'Sépare les corps disconnectés du fichier en pièces individuelles.',

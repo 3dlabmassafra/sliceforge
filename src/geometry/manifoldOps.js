@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import Module from 'manifold-3d'
 import { MeshoptSimplifier } from 'meshoptimizer'
 import { planeBasis, viewBasis } from './plane.js'
+import { selectionBoundary } from './shapeSelect.js'
 import { reservationsCollide } from './collide.js'
 import { niceNormals } from './normals.js'
 
@@ -665,6 +666,296 @@ function pinPlacements(wasm, solid, params) {
     }
   }
   return placements
+}
+
+/**
+ * "Detach along the selection": saw the model exactly along the painted
+ * region's boundary. For every boundary edge a cutter slab is built
+ * through the surface, perpendicular to it (extended along the smoothed
+ * vertex normals so it passes fully through the material, like a jeweler's
+ * saw following the drawn line) — the kerf thickens it. One boolean
+ * subtract, then the pieces are classified: the ones containing a
+ * selection seed come first.
+ *
+ * This is what makes "take the hair off a bust" or "cut the hand at the
+ * wrist" precise: the seam IS the painted boundary, not an approximating
+ * box or plane.
+ */
+export async function selectionCut(geometry, sel, kerf = 0.15) {
+  const bnd = selectionBoundary(geometry, sel)
+  if (!bnd.loops.length) throw new Error('selection has no boundary')
+  const wasm = await getWasm()
+  const { Manifold, Mesh } = wasm
+
+  if (!geometry.boundingBox) geometry.computeBoundingBox()
+  const w2 = Math.max(kerf, 0.04) / 2
+
+  // The solid is probed for classification later; the cutter itself is a
+  // SHRINKING CAP: starting from the boundary loop, each ring steps inward
+  // along the local surface normal (with Laplacian smoothing so rings stay
+  // clean) until it collapses to a point — the surface a jeweler's saw
+  // would open, following the wrist/cuff/hairline form. Thickened by the
+  // kerf into a closed lens-shaped solid.
+  const solid = geometryToManifold(wasm, geometry)
+
+  const centroidOf = (pts) => {
+    const c = new THREE.Vector3()
+    for (const p of pts) c.add(p)
+    return c.divideScalar(pts.length)
+  }
+
+  const vp = []
+  const tv = []
+  for (const loop of bnd.loops) {
+    // ring 0 = the boundary loop itself (positions + outward normals)
+    let cur = []
+    for (let i = 0; i < loop.length; i++) {
+      const v = bnd.verts.get(loop[i])
+      const w = bnd.verts.get(loop[(i + 1) % loop.length])
+      if (!v || !w) continue
+      if (new THREE.Vector3(...w.p).distanceTo(new THREE.Vector3(...v.p)) < 1e-9) continue
+      cur.push({
+        p: new THREE.Vector3(...v.p),
+        n: new THREE.Vector3(v.nx, v.ny, v.nz).normalize()
+      })
+    }
+    if (cur.length < 3) continue
+
+    // Shrink rings until they collapse: the FIRST step goes straight into
+    // the material along -n (the saw enters perpendicular to the surface),
+    // then each ring steps toward its own centroid — the cap funnels
+    // through the wrist/hairline form. Steps are capped by the local
+    // vertex spacing so a ring can never fold over itself.
+    // Pre-smooth the raw boundary loop (it zigzags with the mesh triangles);
+    // the smoothed ring is the mean plane the saw actually follows.
+    for (let pass = 0; pass < 3; pass++) {
+      cur = cur.map((v, i) => {
+        const prev = cur[(i + cur.length - 1) % cur.length].p
+        const next = cur[(i + 1) % cur.length].p
+        return { p: v.p.clone().lerp(prev.clone().add(next).multiplyScalar(0.5), 0.5), n: v.n }
+      })
+    }
+    // Skirt: the smoothed ring lies inside the surface zigzag, so the cap is
+    // flared OUT of the material — radially past the loop (covers the full
+    // cross-section) and lifted along +n (emerges from the surface). This
+    // guarantees a watertight severance even on coarse meshes.
+    const skirtLift = Math.max(0.6, w2 * 5)
+    const skirtGrow = w2 * 2 + 0.4
+    const c0 = centroidOf(cur.map((v) => v.p))
+    const rings = [
+      cur.map((v) => {
+        const out = v.p.clone().sub(c0)
+        if (out.lengthSq() < 1e-12) out.set(0, 1, 0)
+        return v.p.clone().addScaledVector(out.normalize(), skirtGrow).addScaledVector(v.n, skirtLift)
+      }),
+    ]
+    for (let guard = 0; guard < 200 && cur.length >= 3; guard++) {
+      const c = centroidOf(cur.map((v) => v.p))
+      const r = cur.reduce((s, v) => s + v.p.distanceTo(c), 0) / cur.length
+      rings.push(cur.map((v) => v.p.clone()))
+      if (r < Math.max(0.5, w2 * 8)) break
+      let minEdge = Infinity
+      for (let i = 0; i < cur.length; i++) {
+        minEdge = Math.min(minEdge, cur[i].p.distanceTo(cur[(i + 1) % cur.length].p))
+      }
+      const d = Math.min(r * 0.3, Math.max(0.05, minEdge * 0.5))
+      cur = cur.map((v, i) => {
+        const dir = guard === 0 ? v.n.clone().negate() : c.clone().sub(v.p).normalize()
+        const p = v.p.clone().addScaledVector(dir, d)
+        return { p, n: v.n }
+      })
+      // two gentle Laplacian passes keep the ring smooth
+      for (let pass = 0; pass < 2; pass++) {
+        cur = cur.map((v, i) => {
+          const prev = cur[(i + cur.length - 1) % cur.length].p
+          const next = cur[(i + 1) % cur.length].p
+          return { p: v.p.clone().lerp(prev.clone().add(next).multiplyScalar(0.5), 0.35), n: v.n }
+        })
+      }
+    }
+    if (rings.length < 1) continue
+
+    // The cap is thickened along ITS normal (ring tangent x trajectory),
+    // per vertex — never along the trajectory itself.
+    const ringCount = rings.length
+    const offsetDirs = (j) => {
+      const ring = rings[j]
+      const n = ring.length
+      const out = []
+      for (let i = 0; i < n; i++) {
+        const tangent = ring[(i + 1) % n].clone().sub(ring[i]).normalize()
+        let traj
+        if (j + 1 < ringCount) traj = rings[j + 1][i].clone().sub(ring[i])
+        else if (j > 0) traj = ring[i].clone().sub(rings[j - 1][i])
+        else traj = new THREE.Vector3()
+        if (traj.lengthSq() < 1e-12) {
+          // no trajectory yet (single ring): use the boundary normals
+          traj = new THREE.Vector3()
+        }
+        let capN
+        if (traj.lengthSq() < 1e-12) {
+          capN = tangent.clone().cross(new THREE.Vector3(0, 0, 1))
+          if (capN.lengthSq() < 1e-9) capN = tangent.clone().cross(new THREE.Vector3(0, 1, 0))
+        } else {
+          capN = tangent.clone().cross(traj.normalize())
+          if (capN.lengthSq() < 1e-9) {
+            capN = tangent.clone().cross(new THREE.Vector3(0, 0, 1))
+            if (capN.lengthSq() < 1e-9) capN = tangent.clone().cross(new THREE.Vector3(0, 1, 0))
+          }
+        }
+        out.push(capN.normalize().multiplyScalar(w2))
+      }
+      return out
+    }
+
+    const pushSide = (sign) =>
+      rings.map((ring, j) => {
+        const offs = offsetDirs(j)
+        const base = vp.length / 3
+        for (let i = 0; i < ring.length; i++) {
+          vp.push(
+            ring[i].x + sign * offs[i].x,
+            ring[i].y + sign * offs[i].y,
+            ring[i].z + sign * offs[i].z
+          )
+        }
+        return base
+      })
+    const fronts = pushSide(1)
+    const backs = pushSide(-1)
+    const lastRing = rings[ringCount - 1]
+    const tipC = centroidOf(lastRing)
+    const lastOffs = offsetDirs(ringCount - 1)
+    const tipN = new THREE.Vector3()
+    for (const o of lastOffs) tipN.add(o)
+    tipN.normalize().multiplyScalar(w2)
+    const tipF = vp.length / 3
+    vp.push(tipC.x + tipN.x, tipC.y + tipN.y, tipC.z + tipN.z)
+    const tipB = vp.length / 3
+    vp.push(tipC.x - tipN.x, tipC.y - tipN.y, tipC.z - tipN.z)
+
+    const quad = (a1, a2, b1, b2) => tv.push(a1, a2, b2, a1, b2, b1)
+    for (let j = 0; j + 1 < ringCount; j++) {
+      const n = rings[j].length
+      for (let i = 0; i < n; i++) {
+        const k = (i + 1) % n
+        quad(fronts[j] + i, fronts[j] + k, fronts[j + 1] + i, fronts[j + 1] + k)
+        quad(backs[j] + i, backs[j] + k, backs[j + 1] + i, backs[j + 1] + k)
+      }
+    }
+    for (let i = 0; i < lastRing.length; i++) {
+      const k = (i + 1) % lastRing.length
+      tv.push(fronts[ringCount - 1] + i, fronts[ringCount - 1] + k, tipF)
+      tv.push(backs[ringCount - 1] + i, backs[ringCount - 1] + k, tipB)
+    }
+    const R = rings[0].length
+    for (let i = 0; i < R; i++) {
+      const k = (i + 1) % R
+      quad(fronts[0] + i, fronts[0] + k, backs[0] + i, backs[0] + k)
+    }
+  }
+  if (!tv.length) throw new Error('degenerate selection boundary')
+
+  // Orientation: the loft's faces can wind either way. Propagate one
+  // consistent winding across shared edges (BFS), then set the global
+  // sense by signed volume — the boolean needs an outward-oriented cutter.
+  {
+    const triCount = tv.length / 3
+    const edgeMap = new Map() // "min_max" -> [tri indices]
+    for (let t = 0; t < triCount; t++) {
+      for (let e = 0; e < 3; e++) {
+        const a = tv[t * 3 + e]
+        const b = tv[t * 3 + ((e + 1) % 3)]
+        const key = a < b ? a * 4294967296 + b : b * 4294967296 + a
+        let l = edgeMap.get(key)
+        if (!l) edgeMap.set(key, (l = []))
+        l.push(t)
+      }
+    }
+    const flipped = new Uint8Array(triCount)
+    const queue = []
+    // one BFS per connected component (several boundary loops = several
+    // cutter bodies in the same mesh)
+    for (let s = 0; s < triCount; s++) {
+      if (flipped[s]) continue
+      flipped[s] = 1
+      queue.push(s)
+      while (queue.length) {
+      const t = queue.shift()
+      for (let e = 0; e < 3; e++) {
+        const a = tv[t * 3 + e]
+        const b = tv[t * 3 + ((e + 1) % 3)]
+        const key = a < b ? a * 4294967296 + b : b * 4294967296 + a
+        for (const nb of edgeMap.get(key) ?? []) {
+          if (nb === t || flipped[nb]) continue
+          // does the neighbour traverse this edge in the SAME direction?
+          let same = false
+          for (let e2 = 0; e2 < 3; e2++) {
+            if (tv[nb * 3 + e2] === a && tv[nb * 3 + ((e2 + 1) % 3)] === b) same = true
+          }
+          if (same) {
+            const tmp = tv[nb * 3 + 1]
+            tv[nb * 3 + 1] = tv[nb * 3 + 2]
+            tv[nb * 3 + 2] = tmp
+          }
+          flipped[nb] = 1
+          queue.push(nb)
+        }
+      }
+      }
+    }
+  }
+  let signed = 0
+  for (let i = 0; i < tv.length; i += 3) {
+    const a = tv[i] * 3, b = tv[i + 1] * 3, c = tv[i + 2] * 3
+    signed +=
+      (vp[a] * (vp[b + 1] * vp[c + 2] - vp[b + 2] * vp[c + 1]) +
+        vp[a + 1] * (vp[b + 2] * vp[c] - vp[b] * vp[c + 2]) +
+        vp[a + 2] * (vp[b] * vp[c + 1] - vp[b + 1] * vp[c]))
+  }
+  if (signed < 0) for (let i = 0; i < tv.length; i += 3) [tv[i + 1], tv[i + 2]] = [tv[i + 2], tv[i + 1]]
+  // No merge(): the index topology is already shared by construction, and
+  // welding near-tip vertices would collapse edges into non-manifold ones.
+  const cutterMesh = new Mesh({ numProp: 3, vertProperties: new Float32Array(vp), triVerts: new Uint32Array(tv) })
+  const cutter = new Manifold(cutterMesh)
+  if (cutter.status() !== 'NoError') throw new Error('cutter construction failed')
+
+  const carved = solid.subtract(cutter)
+  solid.delete()
+  cutter.delete()
+  let parts = []
+  try {
+    parts = carved.decompose().filter((p) => !p.isEmpty() && p.volume() > 0.01)
+  } finally {
+    carved.delete()
+  }
+  // Which piece is the selection? A seed point (deepest selected triangle,
+  // nudged 0.05mm inward) is inside exactly one piece — odd ray hits.
+  const dir = new THREE.Vector3(0.577, 0.577, 0.577)
+  const reach = geometry.boundingBox.getSize(new THREE.Vector3()).length() * 3
+  const contains = (part, seed) => {
+    const pb = part.boundingBox()
+    const p = new THREE.Vector3(...seed.p).addScaledVector(new THREE.Vector3(...seed.n).normalize(), -0.05)
+    if (
+      p.x < pb.min[0] - 1e-6 || p.x > pb.max[0] + 1e-6 ||
+      p.y < pb.min[1] - 1e-6 || p.y > pb.max[1] + 1e-6 ||
+      p.z < pb.min[2] - 1e-6 || p.z > pb.max[2] + 1e-6
+    )
+      return false
+    const hits = part.rayCast([p.x, p.y, p.z], [p.x + dir.x * reach, p.y + dir.y * reach, p.z + dir.z * reach])
+    return hits.length % 2 === 1
+  }
+  const selParts = parts.filter((p) => bnd.seeds.some((seed) => contains(p, seed)))
+  const rest = parts.filter((p) => !selParts.includes(p))
+  const byVol = (a, b) => b.volume() - a.volume()
+  selParts.sort(byVol)
+  rest.sort(byVol)
+  const out = [...selParts, ...rest].map((p) => {
+    const g = manifoldToGeometry(p)
+    p.delete()
+    return g
+  })
+  return out
 }
 
 /**

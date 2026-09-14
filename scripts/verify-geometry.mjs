@@ -4,7 +4,7 @@
 import * as THREE from 'three'
 import { STLLoader } from 'three/addons/loaders/STLLoader.js'
 import { readFileSync } from 'node:fs'
-import { planeCut, volumeCut, previewPins, simplifyGeometry, curvedCut, smartAnalyze, splitParts } from '../src/geometry/manifoldOps.js'
+import { planeCut, volumeCut, previewPins, simplifyGeometry, curvedCut, smartAnalyze, splitParts, selectionCut } from '../src/geometry/manifoldOps.js'
 import Module from 'manifold-3d'
 import { AXIS_QUATS } from '../src/geometry/plane.js'
 
@@ -518,6 +518,62 @@ console.log('\n=== 12. Freehand curved cut (knife-project style) ===')
   // A single body comes back unchanged.
   const one = await splitParts(new THREE.SphereGeometry(10, 32, 24).toNonIndexed())
   check('splitParts leaves a single body alone', one.length === 1)
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 15: detach along the selection boundary (precise region cuts)
+// ---------------------------------------------------------------------------
+{
+  // Torus: paint a QUARTER (two boundary loops around the tube). No single
+  // plane can isolate it — only a boundary-following cut gives 2 watertight
+  // pieces with the quarter first at ~25% of the volume.
+  const torus = new THREE.TorusGeometry(20, 6, 48, 96).toNonIndexed()
+  const tp = torus.attributes.position.array
+  const tSel = new Uint8Array(tp.length / 9)
+  for (let t = 0; t < tSel.length; t++) {
+    let x = 0, y = 0, z = 0
+    for (let k = 0; k < 3; k++) {
+      x += tp[t * 9 + k * 3]; y += tp[t * 9 + k * 3 + 1]; z += tp[t * 9 + k * 3 + 2]
+    }
+    const ang = Math.atan2(y / 3, x / 3)
+    if (ang >= 0.08 && ang < Math.PI / 2 - 0.08) tSel[t] = 1
+  }
+  const tparts = await selectionCut(torus, tSel, 0.15)
+  check('boundary cut splits the torus', tparts.length === 2, `${tparts.length} pieces`)
+  check('boundary cut pieces watertight', tparts.every(watertight))
+  const tv = tparts.map(volume)
+  // Ideal volume of the painted sector φ ∈ [0.08, π/2−0.08]; the real cut
+  // follows the mean zigzag line of the mesh boundary (± half segment) and
+  // the kerf, so an 8% band around the ideal is the honest expectation.
+  const painted = 2 * Math.PI * Math.PI * 20 * 36 * ((Math.PI / 2 - 0.16) / (2 * Math.PI))
+  check(
+    'boundary cut isolates the painted torus sector',
+    Math.abs(tv[0] - painted) < painted * 0.08,
+    `[${tv.map((x) => x.toFixed(0))}] vs ${painted.toFixed(0)}`
+  )
+
+  // Sphere with a WAVY painted cap: the seam must follow the wavy line
+  // (still exactly 2 watertight pieces, cap first).
+  const sph = new THREE.SphereGeometry(20, 96, 64).toNonIndexed()
+  const sp = sph.attributes.position.array
+  const sSel = new Uint8Array(sp.length / 9)
+  for (let t = 0; t < sSel.length; t++) {
+    let x = 0, y = 0, z = 0
+    for (let k = 0; k < 3; k++) {
+      x += sp[t * 9 + k * 3]; y += sp[t * 9 + k * 3 + 1]; z += sp[t * 9 + k * 3 + 2]
+    }
+    x /= 3; y /= 3; z /= 3
+    if (y > 2 + 1.5 * Math.sin(3 * Math.atan2(z, x))) sSel[t] = 1
+  }
+  const sparts = await selectionCut(sph, sSel, 0.15)
+  check('wavy boundary cut splits the sphere', sparts.length === 2, `${sparts.length} pieces`)
+  check('wavy boundary cut pieces watertight', sparts.every(watertight))
+  sparts.forEach((g, i) => g.computeBoundingBox())
+  check(
+    'selection piece comes first (cap on top)',
+    sparts[0].boundingBox.max.y > sparts[1].boundingBox.max.y,
+    `${sparts[0].boundingBox.max.y.toFixed(1)} > ${sparts[1].boundingBox.max.y.toFixed(1)}`
+  )
 }
 
 console.log('\n' + (failures ? `${failures} FAILURE(S)` : 'ALL CHECKS PASSED'))

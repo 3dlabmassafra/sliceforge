@@ -56,6 +56,9 @@ async function runOp(op, geometry, extra) {
 
 export const splitPartsAsync = (geometry) => runOp('splitParts', geometry, {})
 
+export const selectionCutAsync = (geometry, sel, kerf) =>
+  runOp('selectionCut', geometry, { params: { sel, kerf } })
+
 export const planeCutAsync = (geometry, plane, params) =>
   runOp('planeCut', geometry, { plane, params })
 

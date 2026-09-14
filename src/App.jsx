@@ -6,7 +6,7 @@ import { Viewer, PIECE_COLORS } from './three/viewer.js'
 import { importModelFile, ACCEPTED } from './io/importers.js'
 import { exportSTL, exportOBJ, exportGLB, export3MF } from './io/exporters.js'
 import { AXIS_QUATS, AXIS_INFO, planeBasis, computePlateTransform } from './geometry/plane.js'
-import { planeCutAsync, simplifyAsync, volumeCutAsync, pinPreviewAsync, curvedCutAsync, smartAnalyzeAsync, splitPartsAsync } from './geometry/cutClient.js'
+import { planeCutAsync, simplifyAsync, volumeCutAsync, pinPreviewAsync, curvedCutAsync, smartAnalyzeAsync, splitPartsAsync, selectionCutAsync } from './geometry/cutClient.js'
 import {
   IconCut,
   IconCurve,
@@ -1291,6 +1291,42 @@ export function App() {
     )
   }, [shapeSeed, shapeSens, effRadius, shapeSub])
 
+  // Detach along the painted boundary: the seam follows the selection edge
+  // exactly (hair lines, wrists, cuffs) instead of an approximating box.
+  async function onDetachEdge() {
+    const sh = shapeSelRef.current
+    if (!sh || !sh.sel) return
+    s.setBusy(true)
+    s.setError(null)
+    try {
+      const st = useStore.getState()
+      const piece = st.pieces.find((p) => p.id === sh.pieceId)
+      if (!piece) return
+      const parts = await selectionCutAsync(piece.geometry, sh.sel, st.cutParams.kerf)
+      if (parts.length < 2) {
+        st.setError(makeT(st.lang)('edgeNoSplit'))
+        return
+      }
+      st.replacePiece(
+        piece.id,
+        parts.map((g, i) => ({
+          id: newPieceId(),
+          name: `${piece.name.replace(/\.[^.]+$/, '')}_${i + 1}`,
+          geometry: g,
+          visible: true
+        }))
+      )
+      clearShapeSel()
+      setActiveTool(null)
+      revealCut()
+    } catch (e) {
+      console.error(e)
+      s.setError(t('cutError'))
+    } finally {
+      s.setBusy(false)
+    }
+  }
+
   async function onDetachShape() {
     const sh = shapeSelRef.current
     if (!sh || !sh.sel) return
@@ -2459,10 +2495,14 @@ export function App() {
                 <button
                   className="primary"
                   disabled={s.busy || !shapeMeta}
-                  onClick={onDetachShape}
+                  onClick={onDetachEdge}
                 >
-                  {s.busy ? t('cutting') : t('detachShape')}
+                  {s.busy ? t('cutting') : t('detachEdge')}
                 </button>
+                <button disabled={s.busy || !shapeMeta} onClick={onDetachShape}>
+                  {t('detachShape')}
+                </button>
+                <div className="dims">{t('detachEdgeHint')}</div>
               </section>
             )}
 

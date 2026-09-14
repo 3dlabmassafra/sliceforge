@@ -148,6 +148,132 @@ export function growRegion(geometry, seedTri, angleDeg, radius = Infinity) {
 }
 
 /**
+ * Boundary of a painted selection: the closed loops where selected
+ * triangles meet unselected ones — the exact line "Stacca lungo il bordo"
+ * saws through. Per boundary vertex a smoothed surface normal (the saw
+ * direction), and per loop a seed point pushed deep inside the selection
+ * (used to tell which cut piece is the selection).
+ */
+export function selectionBoundary(geometry, sel) {
+  const { cornerVid, neighbors, triCount } = adjacency(geometry)
+  const pos = geometry.attributes.position.array
+  const idx = geometry.index?.array ?? null
+  const normals = triNormals(geometry)
+  const cent = triCentroids(geometry)
+
+  // Pass 1: boundary edges (selected tri corner with a real, unselected
+  // neighbour) and the set of boundary vertices.
+  const bVerts = new Set()
+  const edges = [] // { a, b, tri } — welded vertex ids, owning selected tri
+  for (let t = 0; t < triCount; t++) {
+    if (!sel[t]) continue
+    for (let e = 0; e < 3; e++) {
+      const slot = t * 3 + e
+      const nb = neighbors[slot]
+      if (nb < 0 || sel[nb]) continue
+      const a = cornerVid[slot]
+      const b = cornerVid[t * 3 + ((e + 1) % 3)]
+      edges.push({ a, b, tri: t })
+      bVerts.add(a)
+      bVerts.add(b)
+    }
+  }
+  if (!edges.length) return { loops: [], verts: new Map(), seeds: [] }
+
+  // Pass 2: smoothed normal + position per boundary vertex, accumulated
+  // from every selected triangle that touches it.
+  const verts = new Map()
+  const touch = (vid, slot, t) => {
+    if (!bVerts.has(vid)) return
+    let v = verts.get(vid)
+    if (!v) {
+      const p = idx ? idx[slot] : slot
+      verts.set(vid, (v = { p: [pos[p * 3], pos[p * 3 + 1], pos[p * 3 + 2]], nx: 0, ny: 0, nz: 0 }))
+    }
+    v.nx += normals[t * 3]
+    v.ny += normals[t * 3 + 1]
+    v.nz += normals[t * 3 + 2]
+  }
+  for (let t = 0; t < triCount; t++) {
+    if (!sel[t]) continue
+    for (let e = 0; e < 3; e++) {
+      const slot = t * 3 + e
+      touch(cornerVid[slot], slot, t)
+    }
+  }
+
+  // Chain boundary edges into loops (walk unvisited edges at each vertex).
+  const byVertex = new Map()
+  edges.forEach((ed, i) => {
+    for (const v of [ed.a, ed.b]) {
+      let l = byVertex.get(v)
+      if (!l) byVertex.set(v, (l = []))
+      l.push(i)
+    }
+  })
+  const visited = new Uint8Array(edges.length)
+  const loops = []
+  for (let start = 0; start < edges.length; start++) {
+    if (visited[start]) continue
+    const loop = []
+    let ei = start
+    let at = edges[start].a
+    while (true) {
+      visited[ei] = 1
+      const ed = edges[ei]
+      const next = ed.a === at ? ed.b : ed.a
+      loop.push(at)
+      at = next
+      if (at === edges[start].a && loop.length > 2) break // closed
+      const cands = (byVertex.get(at) ?? []).filter((j) => !visited[j])
+      if (!cands.length) break // stuck (pinch point): close as-is
+      ei = cands[0]
+    }
+    if (loop.length >= 3) loops.push(loop)
+  }
+
+  // Per loop: seed = deepest selected triangle (BFS from the loop's own
+  // boundary triangles), centroid nudged inward along its face normal.
+  const seeds = []
+  for (const loop of loops) {
+    const depth = new Map()
+    const queue = []
+    const vids = new Set(loop)
+    for (const ed of edges) {
+      if (vids.has(ed.a) || vids.has(ed.b)) {
+        if (!depth.has(ed.tri)) {
+          depth.set(ed.tri, 0)
+          queue.push(ed.tri)
+        }
+      }
+    }
+    let best = queue[0]
+    let bestD = 0
+    while (queue.length) {
+      const t = queue.shift()
+      const d = depth.get(t)
+      if (d > bestD) {
+        bestD = d
+        best = t
+      }
+      for (let e = 0; e < 3; e++) {
+        const nb = neighbors[t * 3 + e]
+        if (nb < 0 || !sel[nb] || depth.has(nb)) continue
+        depth.set(nb, d + 1)
+        queue.push(nb)
+      }
+    }
+    if (best !== undefined) {
+      seeds.push({
+        p: [cent[best * 3], cent[best * 3 + 1], cent[best * 3 + 2]],
+        n: [normals[best * 3], normals[best * 3 + 1], normals[best * 3 + 2]]
+      })
+    }
+  }
+  return { loops, verts, seeds }
+}
+
+/**
  * Connected region whose triangles stay nearly coplanar with the SEED
  * triangle (each candidate is compared to the seed normal, not to its
  * neighbour — gentle curvature cannot drift the selection wide). Used to

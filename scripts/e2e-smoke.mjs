@@ -284,6 +284,17 @@ try {
   const afterSub = await selCount()
   check('shape: subtract erases the over-paint', afterSub < painted, `${painted} -> ${afterSub}`)
 
+  // 5. detach along the painted boundary: the saw follows the selection
+  //    border and splits the model into separate printable pieces
+  await page.locator('button', { hasText: 'Stacca lungo il bordo' }).click()
+  await waitNotBusy(300000)
+  await page.waitForFunction(
+    () => document.querySelectorAll('.piece-item').length >= 2,
+    null,
+    { timeout: 300000 }
+  )
+  check('shape: detach along boundary splits the model', (await countPieces()) >= 2)
+
   // --- multi-object 3MF imports as separate pieces (split3mf-style) ---
   await page.reload({ waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
