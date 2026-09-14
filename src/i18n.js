@@ -1,5 +1,8 @@
 const dict = {
   it: {
+      'splitParts': 'Separa in pezzi',
+      'splitNone': 'Nessun pezzo separabile: il modello è già un corpo unico.',
+      'splitHint': 'Separa i corpi disconnessi del file in pezzi separati.',
       'brushAdd': 'Aggiungi',
       'brushSub': 'Sottrai',
       'shapeClear': 'Deseleziona tutto',
@@ -146,6 +149,9 @@ const dict = {
     scaleToMm: 'Converti in mm (×1000)'
   },
   en: {
+      'splitParts': 'Split into parts',
+      'splitNone': 'Nothing to separate: the model is already a single body.',
+      'splitHint': 'Separates the file\'s disconnected bodies into individual pieces.',
       'brushAdd': 'Add',
       'brushSub': 'Subtract',
       'shapeClear': 'Clear selection',
@@ -292,6 +298,9 @@ const dict = {
     scaleToMm: 'Convert to mm (×1000)'
   },
   pt: {
+      'splitParts': 'Separar em peças',
+      'splitNone': 'Nada a separar: o modelo já é um corpo único.',
+      'splitHint': 'Separa os corpos desconectados do ficheiro em peças individuais.',
       'brushAdd': 'Adicionar',
       'brushSub': 'Subtrair',
       'shapeClear': 'Limpar seleção',
@@ -436,6 +445,9 @@ const dict = {
     scaleToMm: 'Converter para mm (×1000)'
   },
   fr: {
+      'splitParts': 'Séparer en pièces',
+      'splitNone': 'Rien à séparer : le modèle est déjà un corps unique.',
+      'splitHint': 'Sépare les corps disconnectés du fichier en pièces individuelles.',
       'brushAdd': 'Ajouter',
       'brushSub': 'Soustraire',
       'shapeClear': 'Tout désélectionner',

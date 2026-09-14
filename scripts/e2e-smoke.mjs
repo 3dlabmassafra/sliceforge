@@ -284,6 +284,47 @@ try {
   const afterSub = await selCount()
   check('shape: subtract erases the over-paint', afterSub < painted, `${painted} -> ${afterSub}`)
 
+  // --- multi-object 3MF imports as separate pieces (split3mf-style) ---
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(
+    () => document.querySelectorAll('.piece-item').length === 1,
+    null,
+    { timeout: 60000 }
+  )
+  await waitNotBusy()
+  await page.setInputFiles('input[type="file"]', 'scripts/fixtures/two-parts.3mf')
+  await page.waitForFunction(
+    () => document.querySelectorAll('.piece-item').length === 2,
+    null,
+    { timeout: 60000 }
+  )
+  await waitNotBusy()
+  check('multi-object 3MF imports as 2 pieces', (await countPieces()) === 2)
+
+  // --- 2-body STL + "Separa in pezzi" (split3mf equivalent for STLs) ---
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(
+    () => document.querySelectorAll('.piece-item').length === 1,
+    null,
+    { timeout: 60000 }
+  )
+  await waitNotBusy()
+  await page.setInputFiles('input[type="file"]', 'scripts/fixtures/two-shells.stl')
+  await page.waitForFunction(
+    () => document.querySelectorAll('.piece-item').length === 1,
+    null,
+    { timeout: 60000 }
+  )
+  await waitNotBusy()
+  await page.locator('button', { hasText: 'Separa in pezzi' }).click()
+  await page.waitForFunction(
+    () => document.querySelectorAll('.piece-item').length === 2,
+    null,
+    { timeout: 120000 }
+  )
+  await waitNotBusy()
+  check('split separates a 2-body STL into pieces', (await countPieces()) === 2)
+
   // no runtime errors anywhere
   const errorBox = await page.locator('.error').count()
   check('no in-app error banner', errorBox === 0)

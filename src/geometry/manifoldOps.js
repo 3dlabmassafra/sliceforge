@@ -668,6 +668,35 @@ function pinPlacements(wasm, solid, params) {
 }
 
 /**
+ * Split a mesh into its connected components (the separate bodies "already
+ * stored in the file": multi-part exports, detached details, floating
+ * bases). The STL counterpart of what 3MF splitters do with stored objects.
+ * Returns one geometry per body, biggest first; a single-body mesh comes
+ * back unchanged (length 1).
+ */
+export async function splitParts(geometry) {
+  const wasm = await getWasm()
+  const solid = geometryToManifold(wasm, geometry)
+  let parts = []
+  try {
+    parts = solid.decompose().filter((p) => !p.isEmpty())
+  } finally {
+    solid.delete()
+  }
+  if (parts.length < 2) {
+    parts.forEach((p) => p.delete())
+    return [geometry]
+  }
+  parts.sort((a, b) => b.volume() - a.volume())
+  const out = parts.map((p) => {
+    const g = manifoldToGeometry(p)
+    p.delete()
+    return g
+  })
+  return out
+}
+
+/**
  * Preview-only: where would the connectors land for these cut planes?
  * Runs the exact same placement logic as the cut, against the given
  * geometry, and returns world-space poses for the orange ghost markers.

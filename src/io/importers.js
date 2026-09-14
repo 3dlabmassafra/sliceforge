@@ -34,6 +34,32 @@ function collectGeometries(root) {
   return geoms
 }
 
+// Per-object geometries (what a 3MF splitter exposes as "the pieces
+// already stored in the file"). Same color baking as the merged path.
+function collectParts(root) {
+  const geoms = collectGeometries(root)
+  if (!geoms.length) throw new Error('no mesh found in file')
+  for (const geom of geoms) {
+    for (const name of Object.keys(geom.attributes)) {
+      if (name !== 'position' && name !== 'color') geom.deleteAttribute(name)
+    }
+    // An all-white color attribute carries no information — drop it.
+    if (geom.attributes.color) {
+      const a = geom.attributes.color.array
+      let informative = false
+      for (let i = 0; i < a.length; i++) {
+        if (a[i] < 0.999) {
+          informative = true
+          break
+        }
+      }
+      if (!informative) geom.deleteAttribute('color')
+    }
+    niceNormals(geom)
+  }
+  return geoms
+}
+
 function toSingleGeometry(rootOrGeometry) {
   let g
   if (rootOrGeometry.isBufferGeometry) {
@@ -76,10 +102,15 @@ function toSingleGeometry(rootOrGeometry) {
 // export (see exporters.js) so slicers receive them upright too.
 const Z_UP_FORMATS = new Set(['stl', 'obj', '3mf'])
 
+// Returns { geometry, parts }: `geometry` is the whole model as one mesh
+// (unchanged behavior for cuts), `parts` are the file's own objects — a
+// multi-object 3MF yields one part per object (split3mf-style), every
+// other format yields a single part.
 export async function importModelFile(file) {
   const ext = file.name.split('.').pop().toLowerCase()
   const buffer = await file.arrayBuffer()
   let g
+  let parts = null
   switch (ext) {
     case 'stl':
       g = toSingleGeometry(new STLLoader().parse(buffer))
@@ -87,9 +118,19 @@ export async function importModelFile(file) {
     case 'obj':
       g = toSingleGeometry(new OBJLoader().parse(new TextDecoder().decode(buffer)))
       break
-    case '3mf':
-      g = toSingleGeometry(new ThreeMFLoader().parse(buffer))
+    case '3mf': {
+      const root = new ThreeMFLoader().parse(buffer)
+      g = toSingleGeometry(root)
+      // Objects already stored as separate parts in the file: keep them.
+      // Above a sane cap the file is using objects as mesh chunks — merge.
+      try {
+        const list = collectParts(root)
+        if (list.length > 1 && list.length <= 12) parts = list
+      } catch {
+        /* single-blob 3MF */
+      }
       break
+    }
     case 'glb':
     case 'gltf': {
       const gltf = await new GLTFLoader().parseAsync(buffer, '')
@@ -99,8 +140,11 @@ export async function importModelFile(file) {
     default:
       throw new Error(`unsupported format: .${ext}`)
   }
-  if (Z_UP_FORMATS.has(ext)) g.rotateX(-Math.PI / 2)
-  return g
+  if (Z_UP_FORMATS.has(ext)) {
+    g.rotateX(-Math.PI / 2)
+    parts?.forEach((p) => p.rotateX(-Math.PI / 2))
+  }
+  return { geometry: g, parts: parts && parts.length > 1 ? parts : [g] }
 }
 
 export const ACCEPTED = '.stl,.obj,.glb,.gltf,.3mf'

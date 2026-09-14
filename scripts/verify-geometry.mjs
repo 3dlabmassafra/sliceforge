@@ -4,7 +4,7 @@
 import * as THREE from 'three'
 import { STLLoader } from 'three/addons/loaders/STLLoader.js'
 import { readFileSync } from 'node:fs'
-import { planeCut, volumeCut, previewPins, simplifyGeometry, curvedCut, smartAnalyze } from '../src/geometry/manifoldOps.js'
+import { planeCut, volumeCut, previewPins, simplifyGeometry, curvedCut, smartAnalyze, splitParts } from '../src/geometry/manifoldOps.js'
 import Module from 'manifold-3d'
 import { AXIS_QUATS } from '../src/geometry/plane.js'
 
@@ -489,6 +489,35 @@ console.log('\n=== 12. Freehand curved cut (knife-project style) ===')
     check('smart cuts split the humanoid', pieces.length >= 3, `${pieces.length} pieces`)
     check('smart-cut pieces watertight', pieces.every(watertight))
   }
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 14: split into connected components (multi-body STLs)
+// ---------------------------------------------------------------------------
+{
+  // Two disjoint spheres exported as ONE mesh (how multi-part models arrive
+  // in a single STL) must split back into two watertight bodies.
+  const a = new THREE.SphereGeometry(10, 32, 24).translate(0, 0, -25).toNonIndexed()
+  const b = new THREE.SphereGeometry(6, 32, 24).translate(0, 0, 25).toNonIndexed()
+  const merged = new THREE.BufferGeometry()
+  {
+    const pa = a.attributes.position.array
+    const pb = b.attributes.position.array
+    merged.setAttribute('position', new THREE.BufferAttribute(new Float32Array([...pa, ...pb]), 3))
+  }
+  const parts = await splitParts(merged)
+  check('splitParts separates two bodies', parts.length === 2, `${parts.length} parts`)
+  check('splitParts pieces watertight', parts.every(watertight))
+  const vols = parts.map(volume).sort((x, y) => y - x)
+  const exp = [(4 / 3) * Math.PI * 1000, (4 / 3) * Math.PI * 216]
+  check(
+    'splitParts volumes match the bodies',
+    Math.abs(vols[0] - exp[0]) < exp[0] * 0.03 && Math.abs(vols[1] - exp[1]) < exp[1] * 0.03,
+    `[${vols.map((x) => x.toFixed(0))}]`
+  )
+  // A single body comes back unchanged.
+  const one = await splitParts(new THREE.SphereGeometry(10, 32, 24).toNonIndexed())
+  check('splitParts leaves a single body alone', one.length === 1)
 }
 
 console.log('\n' + (failures ? `${failures} FAILURE(S)` : 'ALL CHECKS PASSED'))

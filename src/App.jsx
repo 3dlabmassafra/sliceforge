@@ -6,7 +6,7 @@ import { Viewer, PIECE_COLORS } from './three/viewer.js'
 import { importModelFile, ACCEPTED } from './io/importers.js'
 import { exportSTL, exportOBJ, exportGLB, export3MF } from './io/exporters.js'
 import { AXIS_QUATS, AXIS_INFO, planeBasis, computePlateTransform } from './geometry/plane.js'
-import { planeCutAsync, simplifyAsync, volumeCutAsync, pinPreviewAsync, curvedCutAsync, smartAnalyzeAsync } from './geometry/cutClient.js'
+import { planeCutAsync, simplifyAsync, volumeCutAsync, pinPreviewAsync, curvedCutAsync, smartAnalyzeAsync, splitPartsAsync } from './geometry/cutClient.js'
 import {
   IconCut,
   IconCurve,
@@ -371,6 +371,47 @@ export function App() {
     }
   }
 
+  // Split into connected components: the separate bodies already inside
+  // the file (multi-body STLs, detached details) become individual pieces —
+  // the STL counterpart of 3MF object separation.
+  async function onSplitParts() {
+    const targets = useStore.getState().pieces.filter((p) => p.visible && !isDowelPiece(p))
+    if (!targets.length) return
+    s.setBusy(true)
+    s.setError(null)
+    try {
+      let pieces = [...useStore.getState().pieces]
+      let added = 0
+      for (const piece of targets) {
+        const parts = await splitPartsAsync(piece.geometry)
+        if (parts.length < 2) continue
+        const base = piece.name.replace(/\.[^.]+$/, '')
+        const idx = pieces.findIndex((p) => p.id === piece.id)
+        pieces.splice(
+          idx,
+          1,
+          ...parts.map((g, i) => ({
+            id: newPieceId(),
+            name: `${base}_${i + 1}`,
+            geometry: g,
+            visible: true
+          }))
+        )
+        added += parts.length - 1
+      }
+      if (!added) {
+        useStore.getState().setError(makeT(useStore.getState().lang)('splitNone'))
+      } else {
+        useStore.getState().setPiecesBulk(pieces)
+      }
+    } catch (e) {
+      console.error(e)
+      s.setError(t('cutError'))
+    } finally {
+      s.setBusy(false)
+    }
+  }
+
   // Smart cut: analyze cross-sections of every visible piece and collect
   // the natural parting lines (neck, wrists, limb separations).
   async function onSmartAnalyze() {
@@ -720,8 +761,8 @@ export function App() {
     s.setBusy(true)
     s.setError(null)
     try {
-      const geometry = await importModelFile(file)
-      s.setModel(file.name, geometry)
+      const { geometry, parts } = await importModelFile(file)
+      s.setModel(file.name, parts?.length > 1 ? parts : geometry)
       puzzleSourceRef.current = null // a new model resets puzzle regeneration
       clearPinPreview()
       setSelectedId(1)
@@ -1886,6 +1927,11 @@ export function App() {
                     <span>%</span>
                     <button disabled={s.busy} onClick={onSimplify}>
                       {t('simplify')}
+                    </button>
+                  </div>
+                  <div className="simplify-row">
+                    <button disabled={s.busy} onClick={onSplitParts} title={t('splitHint')}>
+                      {t('splitParts')}
                     </button>
                   </div>
                 </>

@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { planeCut, simplifyGeometry, volumeCut, previewPins, curvedCut, smartAnalyze } from './manifoldOps.js'
+import { planeCut, simplifyGeometry, volumeCut, previewPins, curvedCut, smartAnalyze, splitParts } from './manifoldOps.js'
 
 function toGeometry({ positions, colors, index }) {
   const g = new THREE.BufferGeometry()
@@ -23,7 +23,8 @@ self.onmessage = async (e) => {
   try {
     const g = toGeometry(e.data)
     let results
-    if (op === 'planeCut') results = await planeCut(g, plane, params)
+    if (op === 'splitParts') results = await splitParts(g)
+    else if (op === 'planeCut') results = await planeCut(g, plane, params)
     else if (op === 'simplify') results = [await simplifyGeometry(g, params.ratio)]
     else if (op === 'volumeCut') results = await volumeCut(g, params.matrix)
     else if (op === 'curvedCut')

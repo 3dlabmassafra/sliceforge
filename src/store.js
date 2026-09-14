@@ -252,15 +252,28 @@ export const useStore = create((set, get) => ({
 
   importDims: null,
 
-  setModel: (name, geometry) => {
-    const pieces = [{ id: 1, name, geometry, visible: true }]
+  // `geo` is one geometry, or an array — a multi-object 3MF imports as one
+  // piece per object stored in the file (what 3MF splitters expose).
+  setModel: (name, geo) => {
+    const geoms = Array.isArray(geo) ? geo : [geo]
+    const base = name.replace(/\.[^.]+$/, '')
+    const pieces = geoms.map((g, i) => ({
+      id: i === 0 ? 1 : newPieceId(),
+      name: geoms.length > 1 ? `${base}_${i + 1}` : name,
+      geometry: g,
+      visible: true
+    }))
     groundAndCenter(pieces)
-    geometry.computeBoundingBox()
-    const sz = geometry.boundingBox.getSize(new THREE.Vector3())
-    const center = geometry.boundingBox.getCenter(new THREE.Vector3())
+    const box = new THREE.Box3()
+    for (const p of pieces) {
+      if (!p.geometry.boundingBox) p.geometry.computeBoundingBox()
+      box.union(p.geometry.boundingBox)
+    }
+    const sz = box.getSize(new THREE.Vector3())
+    const center = box.getCenter(new THREE.Vector3())
     const maxDim = Math.max(sz.x, sz.y, sz.z) || 100
 
-    const { pos, quat } = computePlaneFromBBox(geometry.boundingBox, 'y', 0.5, false)
+    const { pos, quat } = computePlaneFromBBox(box, 'y', 0.5, false)
 
     return set({
       modelName: name,

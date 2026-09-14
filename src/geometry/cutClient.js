@@ -54,6 +54,8 @@ async function runOp(op, geometry, extra) {
   return mapped
 }
 
+export const splitPartsAsync = (geometry) => runOp('splitParts', geometry, {})
+
 export const planeCutAsync = (geometry, plane, params) =>
   runOp('planeCut', geometry, { plane, params })
 
