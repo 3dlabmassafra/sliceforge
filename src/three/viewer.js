@@ -106,8 +106,9 @@ export class Viewer {
     loop()
 
     // Click-to-select: a press that barely moved (not an orbit drag, not a
-    // gizmo grab) raycasts the pieces' bounding boxes — O(pieces), instant
-    // even on multi-million-triangle meshes.
+    // gizmo grab) — PRECISE per-triangle raycast, so anterior / lateral /
+    // posterior curves are hit exactly. Falls back to O(pieces) bbox only
+    // if the triangle test finds nothing.
     this.onPieceClick = null
     this.onSelect = null // same payload as onPieceClick (App-facing alias)
     this.onFacePick = null
@@ -422,19 +423,34 @@ export class Viewer {
       }
       // A click that lands on a gizmo handle must not clear the selection.
       if (this.gizmo.axis || this.moveGizmo.axis) return
-      let best = null
-      const target = new THREE.Vector3()
-      for (const mesh of this.piecesGroup.children) {
-        if (!mesh.visible) continue
-        if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox()
-        const box = mesh.geometry.boundingBox.clone().translate(mesh.position)
-        if (this._raycaster.ray.intersectBox(box, target)) {
-          const d = target.distanceTo(this.camera.position)
-          if (!best || d < best.d) best = { d, id: mesh.userData.pieceId }
+      // PRECISE per-triangle hit test: follows anterior / lateral / posterior
+      // curvature exactly (no generous bbox). First try exact triangle raycast;
+      // fall back to bbox only if raycaster returns nothing (e.g. huge meshes
+      // where per-triangle is skipped).
+      const preciseHits = this._raycaster.intersectObjects(
+        this.piecesGroup.children.filter((m) => m.visible),
+        false
+      )
+      let bestId = null
+      if (preciseHits.length) {
+        bestId = preciseHits[0].object.userData.pieceId
+      } else {
+        // bbox fallback (keeps selection usable even if triangle test fails)
+        let best = null
+        const target = new THREE.Vector3()
+        for (const mesh of this.piecesGroup.children) {
+          if (!mesh.visible) continue
+          if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox()
+          const box = mesh.geometry.boundingBox.clone().translate(mesh.position)
+          if (this._raycaster.ray.intersectBox(box, target)) {
+            const d = target.distanceTo(this.camera.position)
+            if (!best || d < best.d) best = { d, id: mesh.userData.pieceId }
+          }
         }
+        bestId = best?.id ?? null
       }
-      this.onPieceClick?.(best?.id ?? null)
-      this.onSelect?.(best?.id ?? null)
+      this.onPieceClick?.(bestId)
+      this.onSelect?.(bestId)
     })
 
     this._onResize = () => {
