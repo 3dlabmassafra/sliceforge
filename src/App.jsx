@@ -185,8 +185,8 @@ export function App() {
   })
   const blockSize = blockSizeState
 
-  const [shapeSens, setShapeSens] = useState(40)
-  const [shapeRadius, setShapeRadius] = useState(25)
+  const [shapeSens, setShapeSens] = useState(30)
+  const [shapeRadius, setShapeRadius] = useState(35)
   const [shapeSeed, setShapeSeed] = useState(null)
   const [shapeSub, setShapeSub] = useState(false) // false = add brush, true = subtract
   const [shapeMeta, setShapeMeta] = useState(null)
@@ -747,15 +747,9 @@ export function App() {
     })
   }, [s.pieces])
 
-  useEffect(() => {
-    if (!s.pieces.length && !s.modelName) {
-      // BASE_URL keeps this working under GitHub Pages sub-paths.
-      fetch(import.meta.env.BASE_URL + 'ratome.stl')
-        .then((r) => (r.ok ? r.blob() : Promise.reject()))
-        .then((b) => loadFile(new File([b], 'ratome.stl')))
-        .catch(() => {})
-    }
-  }, [])
+  // No default model: the user always starts from a clean empty state
+  // and imports their own STL/OBJ/GLB/3MF. This keeps the flow precise
+  // and avoids any unwanted pre-loaded geometry.
 
   async function loadFile(file) {
     s.setBusy(true)

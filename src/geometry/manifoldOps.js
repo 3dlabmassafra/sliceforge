@@ -739,8 +739,8 @@ export async function selectionCut(geometry, sel, kerf = 0.15) {
     // flared OUT of the material — radially past the loop (covers the full
     // cross-section) and lifted along +n (emerges from the surface). This
     // guarantees a watertight severance even on coarse meshes.
-    const skirtLift = Math.max(0.6, w2 * 5)
-    const skirtGrow = w2 * 2 + 0.4
+    const skirtLift = Math.max(1.2, w2 * 8)
+    const skirtGrow = Math.max(1.0, w2 * 4 + 0.8)
     const c0 = centroidOf(cur.map((v) => v.p))
     const rings = [
       cur.map((v) => {
@@ -928,6 +928,97 @@ export async function selectionCut(geometry, sel, kerf = 0.15) {
     parts = carved.decompose().filter((p) => !p.isEmpty() && p.volume() > 0.01)
   } finally {
     carved.delete()
+  }
+  // Fallback: shrinking cap can leave a membrane on thick wrists / coarse
+  // meshes (skirt just inside the zigzag). If the cut did not sever, retry
+  // with a planar wafer wall that is guaranteed to span the model: project
+  // the largest loop onto its best-fit plane, thicken it by the kerf, and
+  // extrude along the plane normal through the whole bounding box.
+  if (parts.length < 2) {
+    for (const p of parts) try { p.delete() } catch {}
+    try {
+      const { CrossSection, Mesh: Mesh2, Manifold: Manifold2 } = wasm
+      // pick largest loop (most vertices — stable on wrist/hand)
+      let best = bnd.loops[0]
+      for (const L of bnd.loops) if (L.length > best.length) best = L
+      const pts3 = []
+      for (const idx of best) {
+        const v = bnd.verts.get(idx)
+        if (v) pts3.push(new THREE.Vector3(...v.p))
+      }
+      if (pts3.length >= 3) {
+        const C = centroidOf(pts3)
+        // Newell normal
+        const N = new THREE.Vector3()
+        for (let i = 0; i < pts3.length; i++) {
+          const a = pts3[i], b = pts3[(i + 1) % pts3.length]
+          N.x += (a.y - b.y) * (a.z + b.z)
+          N.y += (a.z - b.z) * (a.x + b.x)
+          N.z += (a.x - b.x) * (a.y + b.y)
+        }
+        if (N.lengthSq() < 1e-12) N.set(0, 0, 1)
+        N.normalize()
+        // orthonormal basis
+        const tmp = Math.abs(N.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)
+        const U = new THREE.Vector3().crossVectors(N, tmp).normalize()
+        const V = new THREE.Vector3().crossVectors(N, U).normalize()
+        // 2D projection
+        const pts2 = pts3.map((p) => {
+          const d = p.clone().sub(C)
+          return [d.dot(U), d.dot(V)]
+        })
+        // build ring wall as union of per-edge rectangles thickened by w2
+        const rects = []
+        for (let i = 0; i < pts2.length; i++) {
+          const [ax, ay] = pts2[i]
+          const [bx, by] = pts2[(i + 1) % pts2.length]
+          const dx = bx - ax, dy = by - ay
+          const len = Math.hypot(dx, dy)
+          if (len < 1e-9) continue
+          const nx = -dy / len, ny = dx / len
+          rects.push([
+            [ax - nx * w2, ay - ny * w2],
+            [bx - nx * w2, by - ny * w2],
+            [bx + nx * w2, by + ny * w2],
+            [ax + nx * w2, ay + ny * w2]
+          ])
+        }
+        if (rects.length >= 3) {
+          const bbSize = geometry.boundingBox.getSize(new THREE.Vector3()).length()
+          const depth = Math.max(bbSize * 2, 200)
+          const cs = new CrossSection(rects, 'NonZero')
+          const wallLocal = cs.extrude(depth).translate([0, 0, -depth / 2])
+          cs.delete()
+          const wMesh = wallLocal.getMesh()
+          wallLocal.delete()
+          // transform wallLocal (XY plane at C, Z along N) back to world
+          const vpf = wMesh.vertProperties
+          const nProp = wMesh.numProp
+          for (let i = 0; i < vpf.length; i += nProp) {
+            const x = vpf[i], y = vpf[i + 1], z = vpf[i + 2]
+            const wx = C.x + U.x * x + V.x * y + N.x * z
+            const wy = C.y + U.y * x + V.y * y + N.y * z
+            const wz = C.z + U.z * x + V.z * y + N.z * z
+            vpf[i] = wx; vpf[i + 1] = wy; vpf[i + 2] = wz
+          }
+          const wallMesh = new Mesh2({ numProp: nProp, vertProperties: vpf, triVerts: wMesh.triVerts })
+          const cutter2 = new Manifold2(wallMesh)
+          const solid2 = geometryToManifold(wasm, geometry)
+          const carved2 = solid2.subtract(cutter2)
+          solid2.delete(); cutter2.delete()
+          let parts2 = []
+          try { parts2 = carved2.decompose().filter((p) => !p.isEmpty() && p.volume() > 0.01) } finally { carved2.delete() }
+          if (parts2.length >= 2) {
+            parts = parts2
+          } else {
+            for (const p of parts2) try { p.delete() } catch {}
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[selectionCut] wafer fallback failed', e)
+    }
+    if (parts.length < 2) throw new Error('Il taglio lungo il bordo non ha separato il pezzo: prova a selezionare un\'area più netta.')
   }
   // Which piece is the selection? A seed point (deepest selected triangle,
   // nudged 0.05mm inward) is inside exactly one piece — odd ray hits.

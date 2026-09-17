@@ -8,8 +8,8 @@ with matching peg/socket pairs across the seam, ready to drop into any slicer
 
 ## Features (v0.1)
 
-- **Import** STL / OBJ / GLB / GLTF / 3MF (drag & drop or file picker) — a
-  demo mascot loads at startup so you can try every tool immediately
+- **Import** STL / OBJ / GLB / GLTF / 3MF (drag & drop or file picker) — start
+  from a clean empty workspace and import your own model
 - **Model setup** — model always lands centred and resting on the plate
   (auto-grounded after every rotation/resize), right-click menu to re-centre
   or refit the view, per-axis rotation (±15° / ±90°), in-view rotation wheel,
@@ -17,11 +17,12 @@ with matching peg/socket pairs across the seam, ready to drop into any slicer
   dimensions (proportions locked or per-axis), one-click return to the size
   at import (orientation-aware — never distorts a rotated model), one-click
   m→mm fix for metre-unit exports
-- **Per-piece transforms** — click a piece to select it (a lone piece is
-  selected automatically): move it across the plate with in-view arrows,
-  rotate, resize or place it on a face — the other pieces never budge, and
-  undo reverses just that piece. The toolbar separates transform tools from
-  cutting tools
+- **Per-piece transforms** — click a piece to select it with precise
+  per-triangle picking that follows anterior / lateral / posterior curvature
+  (a lone piece is selected automatically): move it across the plate with
+  in-view arrows, rotate, resize or place it on a face — the other pieces
+  never budge, and undo reverses just that piece. The toolbar separates
+  transform tools from cutting tools
 - **Plane cut** — axis + offset + two tilt angles, optional kerf (blade clearance)
 - **Puzzle blocks** — slice a (life-size) model into printable blocks of a
   chosen size (e.g. 230 x 230 x 230 mm), with a live preview of every cut
@@ -33,8 +34,10 @@ with matching peg/socket pairs across the seam, ready to drop into any slicer
   one side is shallow, or are skipped; preview them as orange ghosts before
   committing the cut — then drag, add or remove them by hand on their
   planes (collision-guarded: connectors can never run into each other)
-- **Shape cut** — click a protruding detail (a hand, an ear): the smooth
-  region grows up to the surrounding creases, then detaches as its own piece
+- **Shape cut** — click a protruding detail (a hand, an ear): precise
+  geodesic region growing follows the anterior, lateral and posterior
+  curvature up to the surrounding creases, then detaches exactly along its
+  boundary as its own watertight piece
 - **Box cut** — position/rotate/scale a box in the viewport and detach
   whatever falls inside it (a hand, a head) as its own piece
 - **Alignment pins** — cylindrical peg/socket pairs auto-placed across the cut

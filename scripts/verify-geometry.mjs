@@ -272,7 +272,16 @@ console.log('\n=== 10. Simplification keeps the mesh cuttable ===')
 
 console.log('\n=== 11. Real model: Ratome mascot (organic, 80k tris, raw STL) ===')
 {
-  const buf = readFileSync(new URL('../public/ratome.stl', import.meta.url).pathname)
+  let ratomeAvailable = false
+  let ratomeBuf = null
+  try {
+    ratomeBuf = readFileSync(new URL('../public/ratome.stl', import.meta.url).pathname)
+    ratomeAvailable = true
+  } catch {
+    console.log('SKIP  ratome not bundled — no default model (import your own STL to test real organics)')
+  }
+  if (ratomeAvailable) {
+  const buf = ratomeBuf
   const geo = new STLLoader().parse(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength))
   geo.rotateX(-Math.PI / 2) // importer's Z-up -> Y-up
   const tris = geo.attributes.position.count / 3
@@ -296,6 +305,7 @@ console.log('\n=== 11. Real model: Ratome mascot (organic, 80k tris, raw STL) ==
   check('ratome pieces watertight', parts.every(watertight))
   check('ratome sizes ≈ half each', Math.max(...parts.map(bboxSize).map((s) => s.z)) < size.z * 0.75,
     parts.map(bboxSize).map((s) => s.z.toFixed(1)).join(' / ') + ` of ${size.z.toFixed(1)}`)
+  }
 }
 
 
@@ -332,26 +342,30 @@ console.log('\n=== 12. Freehand curved cut (knife-project style) ===')
 
   // The real model: wavy line across the Ratome's middle (any 3D points
   // whose view-plane projection is the desired curve work — the wall is
-  // built from the 2D projection).
+  // built from the 2D projection). Skipped when no default model is bundled.
   {
-    const buf = readFileSync(new URL('../public/ratome.stl', import.meta.url).pathname)
-    const geo = new STLLoader().parse(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength))
-    geo.rotateX(-Math.PI / 2)
-    geo.computeBoundingBox()
-    const bb = geo.boundingBox
-    const cx = bb.getCenter(new THREE.Vector3())
-    const pts = []
-    for (let i = 0; i <= 14; i++) {
-      const t = i / 14
-      const x = bb.min.x + (bb.max.x - bb.min.x) * (0.1 + 0.8 * t)
-      const y = cx.y + Math.sin(t * Math.PI * 3) * bb.max.y * 0.06
-      pts.push(new THREE.Vector3(x, y, 0))
+    try {
+      const buf2 = readFileSync(new URL('../public/ratome.stl', import.meta.url).pathname)
+      const geo = new STLLoader().parse(buf2.buffer.slice(buf2.byteOffset, buf2.byteOffset + buf2.byteLength))
+      geo.rotateX(-Math.PI / 2)
+      geo.computeBoundingBox()
+      const bb = geo.boundingBox
+      const cx = bb.getCenter(new THREE.Vector3())
+      const pts = []
+      for (let i = 0; i <= 14; i++) {
+        const t = i / 14
+        const x = bb.min.x + (bb.max.x - bb.min.x) * (0.1 + 0.8 * t)
+        const y = cx.y + Math.sin(t * Math.PI * 3) * bb.max.y * 0.06
+        pts.push(new THREE.Vector3(x, y, 0))
+      }
+      const t0 = Date.now()
+      const rparts = await curvedCut(geo, pts, [0, 0, 1], { kerf: 0.15 })
+      check('ratome curved cut into 2 pieces',
+        rparts.length === 2 && rparts.every(watertight),
+        `${rparts.length} pieces in ${((Date.now() - t0) / 1000).toFixed(1)}s`)
+    } catch {
+      console.log('SKIP  ratome curved test — no default model')
     }
-    const t0 = Date.now()
-    const rparts = await curvedCut(geo, pts, [0, 0, 1], { kerf: 0.15 })
-    check('ratome curved cut into 2 pieces',
-      rparts.length === 2 && rparts.every(watertight),
-      `${rparts.length} pieces in ${((Date.now() - t0) / 1000).toFixed(1)}s`)
   }
 
   // Curved cut WITH connectors: pegs and sockets bridging the pieces along

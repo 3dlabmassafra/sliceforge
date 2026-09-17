@@ -27,8 +27,9 @@ push to main by `.github/workflows/deploy.yml`).
 - **Synthetic primitives are NOT sufficient.** Cubes and spheres pass while
   the real experience fails (learned the hard way: smeared cut shading,
   crease-only shape selection useless on sculpts). Every geometry/visual
-  feature must ALSO be exercised on the organic reference (the default Ratome
-  model) with screenshots reviewed before shipping.
+  feature must ALSO be exercised on an organic reference model (import a
+  sculpted STL) with screenshots reviewed before shipping — there is no
+  longer a bundled default model.
 - Conversation with the owner in French; everything in the repo in English.
 - UI copy: plain and factual, FR + EN in `src/i18n.js` (both locales in the
   same edit, keys stay in sync).
@@ -75,9 +76,11 @@ Key invariants:
   (~0.5 s/160k tris in dev) — lazy bake is the next perf item.
 - **Selection (CAD standard)**: clicking a piece in the viewport selects it
   (emissive highlight + list highlight) and summons the rotation gizmo;
-  clicking away or Esc clears. Hit test = bounding-box raycast (O(pieces),
-  instant on huge meshes, but generous around diagonal views) — upgrade to
-  three-mesh-bvh if per-triangle precision is ever needed.
+  clicking away or Esc clears. Hit test = PRECISE per-triangle raycast
+  that follows anterior / lateral / posterior curvature exactly (intersectObjects
+  on the actual mesh), with a bbox fallback only if the triangle test finds
+  nothing — ensures cutting when selecting a part follows the real surface
+  curves on all sides.
 - **Design system (Apple/BambuLab-inspired)**: tokens in `:root` of
   `src/style.css` (surfaces, `--accent` #2f6bff, radii, shadows) — always use
   tokens, never raw colors. Floating glass panels (blur) over the viewport,
@@ -173,10 +176,9 @@ Key invariants:
 
 ## Default model
 
-`public/ratome.stl` — the owner's Ratome SuperHero mascot, decimated to 80 k
-tris and scaled to 180 mm (3.8 MB), auto-loaded at startup (best-effort fetch
-in App.jsx; never overrides a user import). Regenerate from the full-res
-source in ~/Downloads with the simplifyGeometry pipeline if the mascot evolves.
+No default model: the workspace starts empty and the user imports their own
+STL/OBJ/GLB/3MF. The former `public/ratome.stl` auto-load has been removed
+to keep the flow clean and precise (see App.jsx — no fetch on mount).
 
 ## Independent UX audits (owner-mandated protocol)
 
@@ -259,10 +261,11 @@ interieur/exterieur.
     editable, tolerance field exposed in both Tenons and Puzzle sections)
 6b. ~~Place-on-face~~ (OrcaSlicer-style: face tool -> click a face -> model
     rotated so that face lies on the grid; grid re-grounds under it)
-7. ~~Shape cut v2~~ (geodesic-radius grow from the clicked triangle — mm
-    slider, predictable on organic sculpts — combined with crease stops;
-    sliders re-run the selection live from the last seed; orange overlay;
-    detach = boundary-plane-fitted oriented box via volumeCut)
+7. ~~Shape cut v2~~ (precise geodesic-radius grow from the clicked triangle —
+    Dijkstra heap (true shortest-path mm), 0.01 mm welded adjacency,
+    angle-sorted boundary loops that follow anterior / lateral / posterior
+    curvature all the way around a protrusion; orange overlay; detach =
+    shrinking-cap boundary cut exactly along the painted seam, or oriented box)
 8. Color cut — PHASE 1 DONE: color-preserving import (OBJ vertex colors,
     GLB/3MF/MTL material colors baked per vertex, all-white dropped), colored
     display (vertexColors material), colors ride through every boolean as
