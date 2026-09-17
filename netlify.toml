@@ -1,0 +1,26 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# NOTE: deliberately no catch-all "/* -> /index.html" redirect.
+# vite.config.js uses base: './' (relative asset URLs, needed for the
+# GitHub Pages deploy under /sliceforge/). With a catch-all, a deep URL like
+# /foo/bar would serve index.html, whose "./assets/x.js" then resolves to
+# /foo/assets/x.js -- which the catch-all would ALSO rewrite to index.html,
+# handing the browser HTML with a JS MIME type and rendering a blank page.
+# The app is a single page with no client-side router, so none is needed.
+
+# Emscripten/manifold-3d needs the correct MIME type to use the streaming
+# WebAssembly compiler; without it the geometry worker falls back or fails.
+[[headers]]
+  for = "/*.wasm"
+  [headers.values]
+    Content-Type = "application/wasm"
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
