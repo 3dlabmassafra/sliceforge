@@ -453,7 +453,16 @@ export const useStore = create((set, get) => ({
     set((s) => ({
       draftCuts: s.draftCuts.map((c) => (c.id === id ? { ...c, enabled: !c.enabled } : c))
     })),
-  removeDraftCut: (id) => set((s) => ({ draftCuts: s.draftCuts.filter((c) => c.id !== id) })),
+  removeDraftCut: (id) => set((s) => s.busy ? {} : ({ draftCuts: s.draftCuts.filter((c) => c.id !== id) })),
+  moveDraftCut: (id, direction) => set((s) => {
+    if (s.busy) return {}
+    const index = s.draftCuts.findIndex((c) => c.id === id)
+    const target = index + direction
+    if (index < 0 || target < 0 || target >= s.draftCuts.length) return {}
+    const draftCuts = [...s.draftCuts]
+    ;[draftCuts[index], draftCuts[target]] = [draftCuts[target], draftCuts[index]]
+    return { draftCuts }
+  }),
   setDraftApplied: (pieces) =>
     set((s) => ({
       pieces,
