@@ -6,7 +6,7 @@ import { Viewer, PIECE_COLORS } from './three/viewer.js'
 import { importModelFile, ACCEPTED } from './io/importers.js'
 import { exportSTL, exportOBJ, exportGLB, export3MF } from './io/exporters.js'
 import { AXIS_QUATS, AXIS_INFO, planeBasis, computePlateTransform } from './geometry/plane.js'
-import { planeCutAsync, simplifyAsync, volumeCutAsync, pinPreviewAsync, curvedCutAsync, smartAnalyzeAsync, splitPartsAsync, selectionCutAsync } from './geometry/cutClient.js'
+import { planeCutAsync, simplifyAsync, volumeCutAsync, pinPreviewAsync, curvedCutAsync, smartAnalyzeAsync, splitPartsAsync, selectionCutAsync, cancelCuts } from './geometry/cutClient.js'
 import {
   IconCut,
   IconCurve,
@@ -125,6 +125,7 @@ export function App() {
   const [piecesOpen, setPiecesOpen] = useState(true)
   const [uniformScale, setUniformScale] = useState(true)
   const [exportOpen, setExportOpen] = useState(false)
+  const [editingDraftId, setEditingDraftId] = useState(null)
   const [checked, setChecked] = useState({})
   const [volumeMode, setVolumeMode] = useState('translate')
   const [planeMode, setPlaneMode] = useState('translate')
@@ -267,32 +268,78 @@ export function App() {
   // Printable dowels: the HOLES carry the tolerance, the dowel itself is the
   // exact nominal diameter. One piece per size, count accumulated in its
   // name, standing on the plate beside the model, excluded from later cuts.
-  function addDowelPiece(count) {
-    if (!count) return
-    const st = useStore.getState()
-    const cp = st.cutParams
+  function withDowels(pieces, count, cp) {
+    if (!count) return pieces
     const base = `spinotto_${cp.pinDiameter}x${cp.pinLength}`
-    const existing = st.pieces.find((x) => x.name.startsWith(base))
+    const existing = pieces.find((x) => x.name.startsWith(base + '_x'))
     const prev = existing ? parseInt(existing.name.match(/_x(\d+)$/)?.[1] ?? '0', 10) : 0
-    const total = prev + count
     const box = new THREE.Box3()
-    st.pieces.forEach((q) => {
-      if (isDowelPiece(q)) return
-      if (!q.geometry.boundingBox) q.geometry.computeBoundingBox()
-      box.union(q.geometry.boundingBox)
+    pieces.forEach((p) => {
+      if (isDowelPiece(p)) return
+      if (!p.geometry.boundingBox) p.geometry.computeBoundingBox()
+      box.union(p.geometry.boundingBox)
     })
-    const g = new THREE.CylinderGeometry(cp.pinDiameter / 2, cp.pinDiameter / 2, cp.pinLength, 48)
-    g.translate((box.isEmpty() ? 0 : box.max.x) + 15 + cp.pinDiameter, cp.pinLength / 2, 0)
-    const name = `${base}_x${total}`
-    if (existing) {
-      useStore.getState().setPiecesBulk(
-        st.pieces.map((q) => (q === existing ? { ...q, name, geometry: g } : q))
-      )
+    const geometry = new THREE.CylinderGeometry(cp.pinDiameter / 2, cp.pinDiameter / 2, cp.pinLength, 48)
+    geometry.translate((box.isEmpty() ? 0 : box.max.x) + 15 + cp.pinDiameter, cp.pinLength / 2, 0)
+    const dowel = { id: existing?.id ?? newPieceId(), name: `${base}_x${prev + count}`, geometry, visible: true }
+    return existing ? pieces.map((p) => p === existing ? dowel : p) : [...pieces, dowel]
+  }
+
+  function splitPiece(piece, parts) {
+    return parts.map((geometry, i) => ({
+      id: newPieceId(), name: `${piece.name.replace(/\.[^.]+$/, '')}_${i + 1}`, geometry, visible: true
+    }))
+  }
+
+  function showOperationError(error) {
+    s.setError(error.name === 'AbortError' ? t('cancelled') : `${t('cutError')} ${error.message || ''}`)
+  }
+
+  function saveDraft(entry) {
+    if (editingDraftId !== null) s.updateDraftCut(editingDraftId, { ...entry, label: undefined })
+    else s.addDraftCut(entry)
+    setEditingDraftId(null)
+  }
+
+  function editDraft(cut) {
+    setEditingDraftId(cut.id)
+    s.setCutParams({ ...cut.params })
+    if (cut.kind === 'curved') {
+      setActiveTool('curved')
+      curveDirRef.current = cut.viewDir.clone()
+      curveRef.current = cut.points.map((point) => ({ point: point.clone(), dir: cut.viewDir.clone() }))
+      setCurvePoints(curveRef.current)
     } else {
-      useStore.getState().setPiecesBulk([
-        ...st.pieces,
-        { id: newPieceId(), name, geometry: g, visible: true }
-      ])
+      setActiveTool('plane')
+      s.setPlaneCutMode(cut.kind === 'volume' ? 'plate' : 'infinite')
+      if (cut.kind === 'volume') {
+        s.setPlateCutPosition([...cut.plate.position])
+        s.setPlateCutRotation([...cut.plate.rotation])
+        s.setPlateCutSize(cut.plate.width, cut.plate.height)
+      } else {
+        s.setPlane({ pos: [...cut.plane.pos], quat: [...cut.plane.quat] })
+        setManualPins(cut.params.manualPins?.map((p) => [...p]) ?? [])
+        setPinPlacing(Array.isArray(cut.params.manualPins))
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (!s.draftMode || !s.draftCuts.some((c) => c.id === editingDraftId)) setEditingDraftId(null)
+  }, [s.draftMode, s.draftCuts, editingDraftId])
+
+  async function onExport(exporter) {
+    if (s.busy) return
+    s.setBusy(true)
+    s.setError(null)
+    setBusyMsg(t('exporting'))
+    try {
+      await exporter(s.pieces.filter((p) => checked[p.id]), s.modelName)
+    } catch (error) {
+      s.setError(`${t('exportError')}: ${error.message}`)
+    } finally {
+      s.setBusy(false)
+      setBusyMsg(null)
     }
   }
 
@@ -471,37 +518,37 @@ export function App() {
   async function onDraftBuild() {
     const st = useStore.getState()
     const cuts = st.draftCuts.filter((c) => c.enabled)
-    if (!cuts.length || !st.draftSource?.length) return
+    if (st.busy || editingDraftId !== null || !cuts.length || !st.draftSource?.length) return
     s.setBusy(true)
     s.setError(null)
     setBusyMsg(t('draftBuilding'))
     try {
       let pieces = st.draftSource.map((p) => ({ ...p }))
-      for (const cut of cuts) {
-        const targets = pieces.filter((p) => p.visible && !isDowelPiece(p))
-        for (const piece of targets) {
-          const parts =
-            cut.kind === 'curved'
-              ? await curvedCutAsync(piece.geometry, cut.points, cut.viewDir, cut.params)
+      let split = 0
+      for (const [index, cut] of cuts.entries()) {
+        setBusyMsg(`${t('draftBuilding')} ${index + 1} / ${cuts.length}`)
+        const next = []
+        let dowels = 0
+        for (const piece of pieces) {
+          if (!piece.visible || isDowelPiece(piece)) { next.push(piece); continue }
+          const parts = cut.kind === 'curved'
+            ? await curvedCutAsync(piece.geometry, cut.points, cut.viewDir, cut.params)
+            : cut.kind === 'volume'
+              ? await volumeCutAsync(piece.geometry, cut.matrix)
               : await planeCutAsync(piece.geometry, cut.plane, cut.params)
-          if (parts.length < 2) continue
-          const idx = pieces.findIndex((p) => p.id === piece.id)
-          pieces.splice(
-            idx,
-            1,
-            ...parts.map((g, i) => ({
-              id: newPieceId(),
-              name: `${piece.name.replace(/\.[^.]+$/, '')}_${i + 1}`,
-              geometry: g,
-              visible: true
-            }))
-          )
+          if (parts.length < 2) { next.push(piece); continue }
+          split++
+          dowels += parts.dowelCount ?? 0
+          next.push(...splitPiece(piece, parts))
         }
+        pieces = withDowels(next, dowels, cut.params)
       }
+      if (!split) { s.setError(t('noSplit')); return }
       useStore.getState().setDraftApplied(pieces)
+      setActiveTool(null)
+      revealCut()
     } catch (e) {
-      console.error(e)
-      s.setError(t('cutError'))
+      showOperationError(e)
     } finally {
       setBusyMsg(null)
       s.setBusy(false)
@@ -568,7 +615,7 @@ export function App() {
   async function onCurveCut() {
     if (curveRef.current.length < 2 || !curveDirRef.current) return
     if (s.draftMode) {
-      s.addDraftCut({
+      saveDraft({
         kind: 'curved',
         points: curveRef.current.map((cp) => cp.point.clone()),
         viewDir: curveDirRef.current.clone(),
@@ -584,36 +631,26 @@ export function App() {
     setBusyMsg(t('cutting'))
     try {
       const dir = curveDirRef.current
-      const targets = s.pieces.filter((p) => p.visible && !isDowelPiece(p))
-      let split = 0
-      for (const piece of targets) {
-        const parts = await curvedCutAsync(
-          piece.geometry,
-          curveRef.current.map((cp) => cp.point),
-          dir,
-          s.cutParams
-        )
-        if (parts.length < 2) continue
+      const next = []
+      let split = 0, dowels = 0
+      for (const piece of s.pieces) {
+        if (!piece.visible || isDowelPiece(piece)) { next.push(piece); continue }
+        const parts = await curvedCutAsync(piece.geometry, curveRef.current.map((cp) => cp.point), dir, s.cutParams)
+        if (parts.length < 2) { next.push(piece); continue }
         split++
-        useStore.getState().replacePiece(
-          piece.id,
-          parts.map((g, i) => ({
-            id: newPieceId(),
-            name: `${piece.name.replace(/\.[^.]+$/, '')}_${i + 1}`,
-            geometry: g,
-            visible: true
-          }))
-        )
+        dowels += parts.dowelCount ?? 0
+        next.push(...splitPiece(piece, parts))
       }
       if (!split) s.setError(t('curvedNoSplit'))
       else {
+        s.setPiecesBulk(withDowels(next, dowels, s.cutParams))
         curveRef.current = []
         curveDirRef.current = null
         setCurvePoints([])
+        revealCut()
       }
     } catch (e) {
-      console.error(e)
-      s.setError(t('cutError'))
+      showOperationError(e)
     } finally {
       setBusyMsg(null)
       s.setBusy(false)
@@ -752,11 +789,16 @@ export function App() {
   // and avoids any unwanted pre-loaded geometry.
 
   async function loadFile(file) {
+    if (useStore.getState().busy) return
     s.setBusy(true)
     s.setError(null)
     try {
       const { geometry, parts } = await importModelFile(file)
       s.setModel(file.name, parts?.length > 1 ? parts : geometry)
+      lastModelRef.current = null
+      setEditingDraftId(null)
+      setManualPins([])
+      setPinPlacing(false)
       puzzleSourceRef.current = null // a new model resets puzzle regeneration
       clearPinPreview()
       setSelectedId(1)
@@ -1063,68 +1105,39 @@ export function App() {
   }
 
   async function onCut() {
-    // Draft mode: plan the cut instead of executing it.
+    if (s.busy) return
+    const params = { ...s.cutParams, manualPins: pinPlacing || manualPins.length ? manualPins.map((m) => [...m]) : undefined }
+    const plate = { position: [...s.plateCutPosition], rotation: [...s.plateCutRotation], width: s.plateCutWidth, height: s.plateCutHeight }
+    const depth = Math.max(400, (modelBox?.getSize(new THREE.Vector3()).length() ?? 100) * 3)
+    const matrix = computePlateTransform(plate.position, plate.rotation, plate.width, plate.height, depth).elements
     if (s.draftMode) {
-      s.addDraftCut({
-        kind: 'plane',
-        plane: { pos: [...s.plane.pos], quat: [...s.plane.quat] },
-        params: { ...s.cutParams, manualPins: manualPins.length ? manualPins.map((m) => [...m]) : undefined }
-      })
+      saveDraft(s.planeCutMode === 'plate'
+        ? { kind: 'volume', plate, matrix: [...matrix], params: { ...params, pins: false } }
+        : { kind: 'plane', plane: { pos: [...s.plane.pos], quat: [...s.plane.quat] }, params })
       return
     }
     s.setBusy(true)
     s.setError(null)
     try {
-      const targets = s.pieces.filter((p) => p.visible && !isDowelPiece(p))
-      let dowels = 0
-
-      if (s.planeCutMode === 'plate') {
-        const plateMatrix = computePlateTransform(
-          s.plateCutPosition,
-          s.plateCutRotation,
-          s.plateCutWidth,
-          s.plateCutHeight,
-          400
-        )
-        for (const piece of targets) {
-          const parts = await volumeCutAsync(piece.geometry, plateMatrix.elements)
-          if (parts.length < 2) continue
-          useStore.getState().replacePiece(
-            piece.id,
-            parts.map((g, i) => ({
-              id: newPieceId(),
-              name: `${piece.name.replace(/\.[^.]+$/, '')}_${i + 1}`,
-              geometry: g,
-              visible: true
-            }))
-          )
-        }
-      } else {
-        for (const piece of targets) {
-          const parts = await planeCutAsync(piece.geometry, s.plane, {
-            ...s.cutParams,
-            manualPins: manualPins.length ? manualPins : undefined
-          })
-          if (parts.length < 2) continue
-          dowels += parts.dowelCount ?? 0
-          useStore.getState().replacePiece(
-            piece.id,
-            parts.map((g, i) => ({
-              id: newPieceId(),
-              name: `${piece.name.replace(/\.[^.]+$/, '')}_${i + 1}`,
-              geometry: g,
-              visible: true
-            }))
-          )
-        }
-        addDowelPiece(dowels)
+      const next = []
+      let split = 0, dowels = 0
+      for (const piece of s.pieces) {
+        if (!piece.visible || isDowelPiece(piece)) { next.push(piece); continue }
+        const parts = s.planeCutMode === 'plate'
+          ? await volumeCutAsync(piece.geometry, matrix)
+          : await planeCutAsync(piece.geometry, s.plane, params)
+        if (parts.length < 2) { next.push(piece); continue }
+        split++
+        dowels += parts.dowelCount ?? 0
+        next.push(...splitPiece(piece, parts))
       }
+      if (!split) { s.setError(t('noSplit')); return }
+      s.setPiecesBulk(withDowels(next, dowels, s.cutParams))
       setManualPins([])
       setPinPlacing(false)
       revealCut()
     } catch (e) {
-      console.error(e)
-      s.setError(t('cutError'))
+      showOperationError(e)
     } finally {
       s.setBusy(false)
     }
@@ -1202,9 +1215,8 @@ export function App() {
         .forEach((e, i) => {
           e.p.name = `${base}_${String(i + 1).padStart(2, '0')}`
         })
-      useStore.getState().setPiecesBulk([...kept, ...current])
+      useStore.getState().setPiecesBulk(withDowels([...kept, ...current], dowels, s.cutParams))
       puzzleSourceRef.current.ids = new Set(current.map((p) => p.id))
-      addDowelPiece(dowels)
       clearPinPreview()
       revealCut()
       viewerRef.current?.fitCamera?.()
@@ -1371,12 +1383,12 @@ export function App() {
             e.target.value = ''
           }}
         />
-        <button onClick={() => fileRef.current.click()}>{t('import')}</button>
+        <button disabled={s.busy} onClick={() => fileRef.current.click()}>{t('import')}</button>
         {s.pieces.length > 0 && (
           <div className="export-menu">
             <button
               className="primary"
-              disabled={!Object.values(checked).some(Boolean)}
+              disabled={s.busy || !Object.values(checked).some(Boolean)}
               onClick={() => setExportOpen((v) => !v)}
             >
               {t('export')} ({Object.values(checked).filter(Boolean).length}) ▾
@@ -1385,40 +1397,28 @@ export function App() {
               <div className="dropdown" onClick={() => setExportOpen(false)}>
                 <button
                   onClick={() =>
-                    exportSTL(
-                      s.pieces.filter((p) => checked[p.id]),
-                      s.modelName
-                    )
+                    onExport(exportSTL)
                   }
                 >
                   {t('exportStl')}
                 </button>
                 <button
                   onClick={() =>
-                    export3MF(
-                      s.pieces.filter((p) => checked[p.id]),
-                      s.modelName
-                    )
+                    onExport(export3MF)
                   }
                 >
                   {t('export3mf')}
                 </button>
                 <button
                   onClick={() =>
-                    exportGLB(
-                      s.pieces.filter((p) => checked[p.id]),
-                      s.modelName
-                    )
+                    onExport(exportGLB)
                   }
                 >
                   {t('exportGlb')}
                 </button>
                 <button
                   onClick={() =>
-                    exportOBJ(
-                      s.pieces.filter((p) => checked[p.id]),
-                      s.modelName
-                    )
+                    onExport(exportOBJ)
                   }
                 >
                   {t('exportObj')}
@@ -1430,7 +1430,7 @@ export function App() {
         <div className="spacer" />
         <button
           className={`icon-btn draft-toggle${s.draftMode ? ' active' : ''}`}
-          disabled={!s.pieces.length}
+          disabled={s.busy || !s.pieces.length}
           onClick={() => s.setDraftMode(!s.draftMode)}
           aria-label={t('draftMode')}
           title={t('draftMode')}
@@ -1439,7 +1439,7 @@ export function App() {
         </button>
         <button
           className="icon-btn"
-          disabled={!s.history.length || s.draftMode}
+          disabled={s.busy || !s.history.length || s.draftMode}
           onClick={() => s.undo()}
           aria-label={t('undo')}
         >
@@ -1447,7 +1447,7 @@ export function App() {
         </button>
         <button
           className="icon-btn"
-          disabled={!s.future.length || s.draftMode}
+          disabled={s.busy || !s.future.length || s.draftMode}
           onClick={() => s.redo()}
           aria-label={t('redo')}
         >
@@ -1478,6 +1478,7 @@ export function App() {
                   {group.map(([tool, icon, labelKey]) => (
                     <button
                       key={tool}
+                      disabled={s.busy || (s.draftMode && !['plane', 'curved', 'smart'].includes(tool))}
                       className={activeTool === tool ? 'active' : ''}
                       onClick={() => setActiveTool(activeTool === tool ? null : tool)}
                       title={t(labelKey)}
@@ -1617,7 +1618,7 @@ export function App() {
                             boxShadow: `0 0 14px ${currentAxisInfo.glow}`
                           }}
                         >
-                          <IconCut /> {s.busy ? t('cutExecuting') : s.draftMode ? t('draftAddCut') : t('cutExecute')}
+                          <IconCut /> {s.busy ? t('cutExecuting') : s.draftMode ? t(editingDraftId !== null ? 'draftSave' : 'draftAddCut') : t('cutExecute')}
                         </button>
                       </div>
                     </div>
@@ -1784,7 +1785,7 @@ export function App() {
                             color: '#0e1014'
                           }}
                         >
-                          <IconCut /> {s.busy ? t('cutExecuting') : s.draftMode ? t('draftAddCut') : t('cutExecute')}
+                          <IconCut /> {s.busy ? t('cutExecuting') : s.draftMode ? t(editingDraftId !== null ? 'draftSave' : 'draftAddCut') : t('cutExecute')}
                         </button>
                       </div>
                     </div>
@@ -1805,7 +1806,7 @@ export function App() {
             </div>
           )}
 
-          {s.busy && <div className="busy">{busyMsg || t('cutting')}</div>}
+          {s.busy && <div className="busy">{busyMsg || t('cutting')}{busyMsg !== t('exporting') && <button onClick={cancelCuts}>{t('cancelJob')}</button>}</div>}
 
           {ctxMenu && (
             <div
@@ -1856,13 +1857,13 @@ export function App() {
                   })}
                 </div>
               )}
-              {isTiny && (
+              {isTiny && !s.draftMode && (
                 <div className="tiny-hint">
                   {t('tinyModel')}
                   <button onClick={() => s.scaleModel(1000)}>{t('scaleToMm')}</button>
                 </div>
               )}
-              {modelOpen && (
+              {modelOpen && !s.draftMode && (
                 <>
                   {selPiece ? (
                     <>
@@ -2213,11 +2214,15 @@ export function App() {
               <section className="draft-panel">
                 <h3>
                   {t('draftMode')}
-                  <button className="link" onClick={() => s.setDraftMode(false)}>
+                  <button className="link" disabled={s.busy} onClick={() => s.setDraftMode(false)}>
                     {t('draftExit')}
                   </button>
                 </h3>
-                <div className="dims">{t('draftHint')}</div>
+                <div className="dims">{t('draftHint')} {t('draftLocked')}</div>
+                {editingDraftId !== null && <div className="draft-edit-status">
+                  <p>{t('draftEditing', { n: s.draftCuts.findIndex((c) => c.id === editingDraftId) + 1 })}</p>
+                  <button disabled={s.busy} onClick={() => { setEditingDraftId(null); setActiveTool(null) }}>{t('draftCancel')}</button>
+                </div>}
                 {s.draftCuts.length === 0 && <div className="dims">{t('draftEmpty')}</div>}
                 {s.draftCuts.map((cut, i) => (
                   <div key={cut.id} className="simplify-row draft-entry">
@@ -2225,6 +2230,7 @@ export function App() {
                       <input
                         type="checkbox"
                         checked={cut.enabled}
+                        disabled={s.busy}
                         onChange={() => s.toggleDraftCut(cut.id)}
                       />
                       <span className="dims" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -2232,17 +2238,18 @@ export function App() {
                         {cut.label ??
                           (cut.kind === 'plane'
                             ? t('draftEntryPlane', { axis: (AXIS_INFO.find((a) => a.quat.join() === cut.plane.quat.join())?.label ?? '·') })
-                            : t('draftEntryCurved', { n: cut.points.length }))}
+                            : cut.kind === 'volume' ? t('draftVolume') : t('draftEntryCurved', { n: cut.points.length }))}
                       </span>
                     </label>
-                    <button className="link" onClick={() => s.removeDraftCut(cut.id)}>
-                      ✕
-                    </button>
+                    <button className="link" disabled={s.busy} onClick={() => editDraft(cut)}>{t('draftEdit')}</button>
+                    <button className="link" aria-label={t('draftUp')} disabled={s.busy || i === 0} onClick={() => s.moveDraftCut(cut.id, -1)}>↑</button>
+                    <button className="link" aria-label={t('draftDown')} disabled={s.busy || i === s.draftCuts.length - 1} onClick={() => s.moveDraftCut(cut.id, 1)}>↓</button>
+                    <button className="link" aria-label={t('clearPins')} disabled={s.busy} onClick={() => s.removeDraftCut(cut.id)}>×</button>
                   </div>
                 ))}
                 <button
                   className="primary"
-                  disabled={s.busy || !s.draftCuts.some((c) => c.enabled)}
+                  disabled={s.busy || editingDraftId !== null || !s.draftCuts.some((c) => c.enabled)}
                   onClick={onDraftBuild}
                 >
                   {s.busy ? busyMsg || t('cutting') : t('draftBuild')}
@@ -2254,6 +2261,21 @@ export function App() {
               <section>
                 <h3>{t('curvedCut')}</h3>
                 <div className="dims">{t('curvedHint')}</div>
+                {curvePoints.length > 0 && <details className="curve-point-editor">
+                  <summary>{t('curveEditPoints')}</summary>
+                  {curvePoints.map((cp, i) => <div className="dim-row" key={i}>
+                    <span>{i + 1}</span>
+                    {['x', 'y', 'z'].map((axis) => <input key={axis} aria-label={`Point ${i + 1} ${axis}`} type="number" step="0.1" value={+cp.point[axis].toFixed(2)} disabled={s.busy} onChange={(e) => {
+                      if (e.target.value === '' || !Number.isFinite(+e.target.value)) return
+                      curveRef.current = curveRef.current.map((entry, j) => {
+                        const point = entry.point.clone()
+                        if (j === i) point[axis] = +e.target.value
+                        return { ...entry, point }
+                      })
+                      setCurvePoints(curveRef.current)
+                    }} />)}
+                  </div>)}
+                </details>}
                 <div className="dims">
                   {t('curvedPoints', { n: curvePoints.length })}
                   {curvePoints.length > 0 && (
@@ -2404,7 +2426,7 @@ export function App() {
                   disabled={s.busy || curvePoints.length < 2}
                   onClick={onCurveCut}
                 >
-                  {s.busy ? t('cutting') : s.draftMode ? t('draftAddCut') : t('curvedExecute')}
+                  {s.busy ? t('cutting') : s.draftMode ? t(editingDraftId !== null ? 'draftSave' : 'draftAddCut') : t('curvedExecute')}
                 </button>
               </section>
             )}
