@@ -1,10 +1,25 @@
 import * as THREE from 'three'
 
-// Main-thread facade over the geometry worker: heavy Manifold/meshopt work
-// runs off the UI thread, geometries cross the boundary as transferables.
+// Each request owns copies: cancellation can never detach the visible model.
 let worker = null
 let seq = 0
 const pending = new Map()
+
+function resetWorker(error) {
+  worker?.terminate()
+  worker = null
+  for (const p of pending.values()) {
+    clearTimeout(p.timer)
+    p.reject(error)
+  }
+  pending.clear()
+}
+
+export function cancelCuts() {
+  const error = new Error('Operation cancelled; original model unchanged')
+  error.name = 'AbortError'
+  resetWorker(error)
+}
 
 function getWorker() {
   if (!worker) {
@@ -13,6 +28,7 @@ function getWorker() {
       const { id, ok, results, plain, error } = e.data
       const p = pending.get(id)
       if (!p) return
+      clearTimeout(p.timer)
       pending.delete(id)
       if (!ok) p.reject(new Error(error))
       else if (plain !== undefined) p.resolve({ plain })
@@ -21,26 +37,33 @@ function getWorker() {
         p.resolve(results)
       }
     }
-    worker.onerror = (e) => {
-      for (const p of pending.values()) p.reject(new Error(e.message || 'worker error'))
-      pending.clear()
-    }
+    worker.onerror = (e) => resetWorker(new Error(e.message || 'Geometry worker failed'))
+    worker.onmessageerror = () => resetWorker(new Error('Invalid geometry worker response'))
   }
   return worker
 }
 
-async function runOp(op, geometry, extra) {
+function request(op, geometry, extra = {}) {
   const id = ++seq
-  // Copies: the displayed geometry must keep its buffers.
   const positions = new Float32Array(geometry.attributes.position.array)
   const colors = geometry.attributes.color ? new Float32Array(geometry.attributes.color.array) : null
   const index = geometry.index ? new Uint32Array(geometry.index.array) : null
-  const promise = new Promise((resolve, reject) => pending.set(id, { resolve, reject }))
-  getWorker().postMessage(
-    { id, op, positions, colors, index, ...extra },
-    [positions.buffer, colors?.buffer, index?.buffer].filter(Boolean)
-  )
-  const results = await promise
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resetWorker(new Error('Geometry operation timed out after 5 minutes')), 300_000)
+    pending.set(id, { resolve, reject, timer })
+    try {
+      getWorker().postMessage(
+        { id, op, positions, colors, index, ...extra },
+        [positions.buffer, colors?.buffer, index?.buffer].filter(Boolean)
+      )
+    } catch (error) {
+      resetWorker(error)
+    }
+  })
+}
+
+async function runOp(op, geometry, extra) {
+  const results = await request(op, geometry, extra)
   const mapped = results.map((r) => {
     const g = new THREE.BufferGeometry()
     g.setAttribute('position', new THREE.BufferAttribute(r.positions, 3))
@@ -55,28 +78,15 @@ async function runOp(op, geometry, extra) {
 }
 
 export const splitPartsAsync = (geometry) => runOp('splitParts', geometry, {})
-
 export const selectionCutAsync = (geometry, sel, kerf) =>
   runOp('selectionCut', geometry, { params: { sel, kerf } })
-
 export const planeCutAsync = (geometry, plane, params) =>
   runOp('planeCut', geometry, { plane, params })
-
 export const simplifyAsync = (geometry, ratio) => runOp('simplify', geometry, { params: { ratio } })
-
 export const volumeCutAsync = (geometry, matrix) => runOp('volumeCut', geometry, { params: { matrix } })
 
-// Plain-data op: smart cut candidate analysis (no geometry comes back).
 export async function smartAnalyzeAsync(geometry, axis, sensitivity) {
-  const id = ++seq
-  const positions = new Float32Array(geometry.attributes.position.array)
-  const index = geometry.index ? new Uint32Array(geometry.index.array) : null
-  const promise = new Promise((resolve, reject) => pending.set(id, { resolve, reject }))
-  getWorker().postMessage(
-    { id, op: 'smartAnalyze', positions, index, params: { axis, sensitivity } },
-    [positions.buffer, index?.buffer].filter(Boolean)
-  )
-  const res = await promise
+  const res = await request('smartAnalyze', geometry, { params: { axis, sensitivity } })
   return res.plain ?? { axis, lo: 0, hi: 0, candidates: [] }
 }
 
@@ -89,16 +99,7 @@ export const curvedCutAsync = (geometry, points, viewDir, params) =>
     }
   })
 
-// Plain-data op: connector preview poses (no geometry comes back).
 export async function pinPreviewAsync(geometry, planes, params) {
-  const id = ++seq
-  const positions = new Float32Array(geometry.attributes.position.array)
-  const index = geometry.index ? new Uint32Array(geometry.index.array) : null
-  const promise = new Promise((resolve, reject) => pending.set(id, { resolve, reject }))
-  getWorker().postMessage(
-    { id, op: 'pinPreview', positions, index, params: { ...params, planes } },
-    [positions.buffer, index?.buffer].filter(Boolean)
-  )
-  const res = await promise
+  const res = await request('pinPreview', geometry, { params: { ...params, planes } })
   return res.plain ?? { pins: [], sections: [] }
 }

@@ -111,7 +111,7 @@ export const useStore = create((set, get) => ({
 
   cutPlaneAxis: 'y', // 'x' | 'y' | 'z'
   setCutPlaneAxis: (axis) => {
-    const { pieces, cutPlaneOffset, cutPlaneFlip, plane } = get()
+    const { pieces, cutPlaneAxis, cutPlaneFlip, plane } = get()
     if (!pieces.length) {
       set({ cutPlaneAxis: axis })
       return
@@ -281,6 +281,10 @@ export const useStore = create((set, get) => ({
       pieces,
       history: [],
       future: [],
+      draftMode: false,
+      draftCuts: [],
+      draftSource: null,
+      cutPlanes: [],
       explode: 0,
       error: null,
       cutPlaneAxis: 'y',
@@ -296,6 +300,7 @@ export const useStore = create((set, get) => ({
 
   centerModel: () =>
     set((s) => {
+      if (s.busy || s.draftMode) return {}
       const d = groundAndCenter(s.pieces)
       if (!d[0] && !d[1] && !d[2]) return {}
       const m = new THREE.Matrix4().makeTranslation(d[0], d[1], d[2])
@@ -313,7 +318,7 @@ export const useStore = create((set, get) => ({
 
   undo: () =>
     set((s) => {
-      if (!s.history.length) return {}
+      if (s.busy || s.draftMode || !s.history.length) return {}
       const history = [...s.history]
       const entry = history.pop()
       if (entry.kind === 'matrix') {
@@ -335,7 +340,7 @@ export const useStore = create((set, get) => ({
 
   redo: () =>
     set((s) => {
-      if (!s.future.length) return {}
+      if (s.busy || s.draftMode || !s.future.length) return {}
       const future = [...s.future]
       const entry = future.pop()
       if (entry.kind === 'matrix') {
@@ -357,6 +362,7 @@ export const useStore = create((set, get) => ({
 
   rotateModelQuaternion: (q, id = null) =>
     set((s) => {
+      if (s.busy || s.draftMode) return {}
       const targets = id ? s.pieces.filter((p) => p.id === id) : s.pieces
       if (!targets.length) return {}
       const m = transformPieces(
@@ -369,6 +375,7 @@ export const useStore = create((set, get) => ({
 
   rotateModel: (axis, deg, id = null) =>
     set((s) => {
+      if (s.busy || s.draftMode) return {}
       const targets = id ? s.pieces.filter((p) => p.id === id) : s.pieces
       if (!targets.length) return {}
       const rad = THREE.MathUtils.degToRad(deg)
@@ -382,14 +389,17 @@ export const useStore = create((set, get) => ({
 
   resizeModel: (fx, fy, fz, id = null) =>
     set((s) => {
+      if (s.busy || s.draftMode) return {}
       const targets = id ? s.pieces.filter((p) => p.id === id) : s.pieces
       if (!targets.length) return {}
+      if (![fx, fy, fz].every((v) => Number.isFinite(v) && v > 0)) return {}
       const m = transformPieces(targets, () => new THREE.Matrix4().makeScale(fx, fy, fz), s.pieces)
       return { pieces: [...s.pieces], ...pushEntry(s, matrixEntry(m, id ? [id] : null)) }
     }),
 
   translatePiece: (id, dx, dz) =>
     set((s) => {
+      if (s.busy || s.draftMode || !Number.isFinite(dx) || !Number.isFinite(dz)) return {}
       const piece = s.pieces.find((p) => p.id === id)
       if (!piece || (Math.abs(dx) < 1e-4 && Math.abs(dz) < 1e-4)) return {}
       piece.geometry.translate(dx, 0, dz)
@@ -399,6 +409,7 @@ export const useStore = create((set, get) => ({
 
   scaleModel: (factor) =>
     set((s) => {
+      if (s.busy || s.draftMode || !Number.isFinite(factor) || factor <= 0) return {}
       for (const p of s.pieces) {
         p.geometry.scale(factor, factor, factor)
       }
@@ -421,11 +432,13 @@ export const useStore = create((set, get) => ({
   // entries and only applied, in order, when the user builds.
   setDraftMode: (on) =>
     set((s) => {
+      if (s.busy || on === s.draftMode) return {}
       if (!on) return { draftMode: false, draftCuts: [], draftSource: null }
+      if (!s.pieces.length) return {}
       return {
         draftMode: true,
         draftCuts: [],
-        draftSource: s.pieces.map((p) => ({ ...p }))
+        draftSource: s.pieces.map((p) => ({ ...p, geometry: p.geometry.clone() }))
       }
     }),
   addDraftCut: (entry) =>
@@ -440,7 +453,16 @@ export const useStore = create((set, get) => ({
     set((s) => ({
       draftCuts: s.draftCuts.map((c) => (c.id === id ? { ...c, enabled: !c.enabled } : c))
     })),
-  removeDraftCut: (id) => set((s) => ({ draftCuts: s.draftCuts.filter((c) => c.id !== id) })),
+  removeDraftCut: (id) => set((s) => s.busy ? {} : ({ draftCuts: s.draftCuts.filter((c) => c.id !== id) })),
+  moveDraftCut: (id, direction) => set((s) => {
+    if (s.busy) return {}
+    const index = s.draftCuts.findIndex((c) => c.id === id)
+    const target = index + direction
+    if (index < 0 || target < 0 || target >= s.draftCuts.length) return {}
+    const draftCuts = [...s.draftCuts]
+    ;[draftCuts[index], draftCuts[target]] = [draftCuts[target], draftCuts[index]]
+    return { draftCuts }
+  }),
   setDraftApplied: (pieces) =>
     set((s) => ({
       pieces,
