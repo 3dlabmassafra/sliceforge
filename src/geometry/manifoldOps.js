@@ -649,10 +649,15 @@ function pinPlacements(wasm, solid, params) {
   } else {
     spots = pinSpots(polys, r, tol, params.spacing)
   }
-  const testR = (r + tol + PIN_WALL) * (params.connectorType === 'dovetail' ? 1.28 : 1)
+  // Enclose corners too: a square's diagonal exceeds its nominal width.
+  const footprint = params.connectorType === 'square' ? Math.SQRT2 : params.connectorType === 'dovetail' ? 1.28 : 1
+  const testR = (r + tol) * footprint + PIN_WALL
   const testH = h + 2 * tol + 2 * PIN_WALL
   const placements = []
   for (const [x, y] of spots) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+    // Manual placements use the same collision guard as automatic ones.
+    if (placements.some(([px, py]) => Math.hypot(px - x, py - y) < 2 * testR + 1)) continue
     for (const off of [0, 0.2 * h, -0.2 * h]) {
       const tester = Manifold.cylinder(testH, testR, testR, 16, true).translate([x, y, off])
       const leak = tester.subtract(solid)
@@ -1357,7 +1362,27 @@ function pinSpots(polys, r, tol, spacing) {
  * Returns an array of 1..2 BufferGeometries (a plane fully outside the model
  * returns the untouched solid as a single piece).
  */
-export async function planeCut(geometry, plane, params) {
+function validateCutParams(params) {
+  for (const key of ['kerf', 'tolerance', 'spacing']) {
+    if (params[key] !== undefined && (!Number.isFinite(params[key]) || params[key] < 0)) {
+      throw new Error(`Invalid ${key}: expected finite non-negative millimeters`)
+    }
+  }
+  if (params.pins) {
+    for (const key of ['pinDiameter', 'pinLength']) {
+      if (!Number.isFinite(params[key]) || params[key] <= 0) throw new Error(`Invalid ${key}`)
+    }
+    if ((params.kerf ?? 0) >= params.pinLength * 0.6) {
+      throw new Error('Cut gap is too large for the connector length')
+    }
+  }
+}
+
+export async function planeCut(geometry, plane, params = {}) {
+  validateCutParams(params)
+  if (!plane?.pos?.every(Number.isFinite) || !plane?.quat?.every(Number.isFinite)) {
+    throw new Error('Invalid cutting plane')
+  }
   const wasm = await getWasm()
   const { Manifold } = wasm
   const { origin } = planeBasis(plane)
@@ -1375,6 +1400,13 @@ export async function planeCut(geometry, plane, params) {
   const hasColor = !!geometry.attributes.color
   gLocal.computeBoundingBox()
   const lb = gLocal.boundingBox.clone()
+  // Return in WORLD coordinates. Also avoid negative half-space box sizes
+  // for colored models and planes outside the model during a multi-cut.
+  const gap = Math.max(0, params.kerf ?? 0) / 2
+  if (lb.min.z >= -gap || lb.max.z <= gap) {
+    gLocal.dispose()
+    return [geometry.clone()]
+  }
   const solid = geometryToManifold(wasm, gLocal)
   gLocal.dispose()
 
@@ -1415,7 +1447,7 @@ export async function planeCut(geometry, plane, params) {
     cleanup.push(top, bottom)
 
     if (top.isEmpty() || bottom.isEmpty()) {
-      return [manifoldToGeometry(solid)]
+      return [manifoldToGeometry(solid).applyMatrix4(toWorld)]
     }
 
     if (params.pins) {
@@ -1596,6 +1628,7 @@ export async function simplifyGeometry(geometry, ratio) {
  * exactly where the visible surface gets cut.
  */
 export async function curvedCut(geometry, points, viewDir, params = {}) {
+  validateCutParams(params)
   if (!points || points.length < 2) throw new Error('curved cut needs at least 2 points')
   const wasm = await getWasm()
   const { CrossSection } = wasm
@@ -1758,10 +1791,7 @@ function applyCurvedPins(wasm, solid, parts, ctx) {
   const zMax = bb.max.z
   const accepted = []
   for (const c of cands) {
-    if (accepted.length) {
-      const lastP = accepted[accepted.length - 1]
-      if (Math.hypot(c.x - lastP.x, c.y - lastP.y) < spacing) continue
-    }
+    if (accepted.some((p) => Math.hypot(c.x - p.x, c.y - p.y) < spacing)) continue
     // In-plane normal of the curve at this candidate.
     const m = new THREE.Vector3(c.ty, -c.tx, 0)
     // Depth: material intervals along the view axis at (x, y) — the pin
